@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - run: mise run fmt-check
+      - run: mise run test
+      - run: mise run lint
+      - run: mise run build
+
+  build-cli:
+    name: Build CLI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            extension: ""
+          - os: windows-latest
+            extension: .exe
+          - os: macos-latest
+            extension: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - run: mise exec -- cargo build --locked --release --package chuanshanjia --bin chuanshanjia
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chuanshanjia-${{ runner.os }}-${{ runner.arch }}
+          path: target/release/chuanshanjia${{ matrix.extension }}
+          if-no-files-found: error
+
+  build-server:
+    name: Build Server (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - run: mise exec -- cargo build --locked --release --package chuanshanjia-backend --bin chuanshanjia-server
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chuanshanjia-server-${{ runner.os }}-${{ runner.arch }}
+          path: target/release/chuanshanjia-server
+          if-no-files-found: error

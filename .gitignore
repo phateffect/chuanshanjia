@@ -1,0 +1,20 @@
+/target
+
+# Local server configuration and credentials
+server.toml
+.env
+.env.*
+!.env.example
+
+# Local mise overrides; this project does not use a mise lockfile
+mise.lock
+mise.local.toml
+
+# Crash dumps and Rust backup files
+*.core
+core
+core.*
+*.rs.bk
+
+# macOS
+.DS_Store

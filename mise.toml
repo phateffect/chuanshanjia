@@ -1,0 +1,14 @@
+[tools]
+rust = "stable"
+
+[tasks.fmt-check]
+run = "cargo fmt --all --check"
+
+[tasks.test]
+run = "cargo test --workspace"
+
+[tasks.lint]
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.build]
+run = "cargo build --workspace"
