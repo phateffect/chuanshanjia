@@ -185,13 +185,14 @@ pub trait SearchProvider: Send + Sync {
 
 信任链只有一条：**CLI 向 IdP 登录拿 token，Server 拿 IdP 的公钥验 token**。Server 不签发 token——否则它就要自己管签名密钥、轮换、续期、吊销和用户映射，等于重造一个 IdP，还多一跳信任跳跃。
 
+- **登录前配置检查**：`resource` 没有内置默认值，必须由配置或 `--resource` 显式提供。CLI 先读取 `base_url` 下的 RFC 9728 资源元数据，核对 `resource` 与 `authorization_servers` 中的 issuer；仅当显式指定 scope 时，才检查它是否覆盖 `scopes_supported`。任一检查失败或元数据不可用都不进入 OIDC 授权流程。这样本地配置错误会在打开浏览器前暴露，但不能替代 IdP 对 resource 的登记检查。
 - **授权码 + PKCE（S256）+ 公开客户端**：CLI 无法保守 secret（二进制里必然泄漏），所以用 `token_endpoint_auth_method = none` + PKCE；IdP 侧注册公开客户端，重定向 URI 使用 loopback callback。`state` 与 PKCE `code_verifier` 均每次随机生成，回调里先校 `state` 再换 token。
 - **随机 loopback 端口**：按 RFC 8252，IdP 匹配 loopback `redirect_uri` 时忽略端口，因此默认 `http://127.0.0.1:0/callback`——`:0` 让系统挑空闲端口，实际端口再写进授权请求。这样并发登录不会抢端口，也不需要预注册固定端口。监听端口始终从 `redirect_uri` 推导；需要固定端口时用 `--redirect-uri http://127.0.0.1:8765/callback`。
 - **JWT access token**：OIDC 本地登录会话只使用 JWT 形态的 `access_token`；不透明或格式不符时报错，因为 Server 只支持离线验签。
-- **scope 与 consent**：默认 `openid profile email offline_access logs:read`；带 `offline_access` 时附加 `prompt=consent`，否则不少 IdP 不会返回 `refresh_token`。
-- **业务 scope 显式申请并获得授权**：实际签发的 scope 取决于请求和 IdP 配置。漏申请或 client 未获授权时，token 可能通过验签但没有业务权限。因此 CLI 默认包含 `logs:read`，Server 也可用 `oidc_required_scopes` 做纵深防御。
+- **scope 与 consent**：未配置且未传 `--scope` 时完全省略授权请求的 `scope` 参数，由 IdP 根据 client 和 resource 决定默认授权，不内置业务 scope。显式 scope 带 `offline_access` 时附加 `prompt=consent`；缺省时是否返回 `refresh_token` 由 IdP 决定。
+- **业务 scope 由 IdP 实际授予**：实际签发的 scope 取决于请求（或缺省授权）和 IdP 配置。无论是否显式申请，Server 都可用 `oidc_required_scopes` 检查实际 token，验签通过不代表拥有业务权限。
 - **token 存储**：`~/.config/chuanshanjia/credentials.toml`，Unix 下 `0600`；不放进 `config.toml`，因为后者是用户手改的配置，凭证应是程序维护的产物（也便于 `logout` 只删一个文件）。
-- **续期**：默认 scope 含 `offline_access` 以获取 `refresh_token`；`search` 发现 `expires_at` 进入 60 秒窗口就先用 `refresh_token` 静默续期并回写文件，失败则提示重新 `login`。若 IdP 不轮换 refresh token，则保留旧值。
+- **续期**：`search` 发现 `expires_at` 进入 60 秒窗口就先用 `refresh_token` 静默续期并回写文件，失败则提示重新 `login`。若 IdP 不轮换 refresh token，则保留旧值。
 - **token 选择顺序**：`--token` > 本地会话 > 配置文件 `token`。保留后两者是为了兼容尚未接入 OIDC、手工拿 token 的场景。
 - **`--no-browser`**：只打印授权 URL，供 SSH/无桌面环境与自动化测试使用。
 
@@ -206,7 +207,7 @@ IdP 按 RFC 9068 签发 JWT access token 时（`typ: at+jwt`），`aud` 取自 R
 ### 5.3 `scope` 校验与资源元数据
 
 - **`server.oidc_required_scopes`**：`aud` 只回答「这张 token 是不是给我」，回答不了「允许做什么」。配置后要求 token 的 `scope` 覆盖全部所需项（兼容 RFC 9068 的空格分隔字符串与部分 IdP 的数组编码）。留空则跳过。业务 scope 的可用值和授予规则由实际 IdP 配置决定，discovery 的 `scopes_supported` 不一定包含它们，因此应以实际签发的 token 或 IdP 配置为准。
-- **RFC 9728 元数据**：后端发布 `/.well-known/oauth-protected-resource`，声明 `resource`、`authorization_servers` 与 `scopes_supported`，让客户端不必硬编码资源标识。这里复用 `oidc_audiences[0]` 作为资源标识，避免再引入一个必须保持同步的配置项。
+- **RFC 9728 元数据**：后端发布 `/.well-known/oauth-protected-resource`，声明 `resource`、`authorization_servers` 与 `scopes_supported`，作为 CLI 登录前校验本地配置的依据，而不是由 CLI 内置一个可能不适用的默认资源标识。这里复用 `oidc_audiences[0]` 作为资源标识，避免 Server 再引入一个必须保持同步的配置项。
 
 ### 5.4 登出即吊销
 
