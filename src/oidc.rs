@@ -351,15 +351,33 @@ fn credentials_from(
     previous: Option<&Credentials>,
 ) -> Credentials {
     let previous_refresh = previous.and_then(|previous| previous.refresh_token.clone());
+    // Not every IdP returns `expires_in` on the authorization-code exchange.
+    // Falling back to the JWT `exp` claim keeps `is_fresh` meaningful, so a
+    // short-lived token is actually refreshed instead of being treated as
+    // valid forever.
+    let expires_at = tokens
+        .expires_in
+        .map(|expires_in| now() + expires_in)
+        .or_else(|| jwt_expiry(&tokens.access_token));
     Credentials {
         issuer,
         client_id: client_id.to_owned(),
         token_endpoint: token_endpoint.to_owned(),
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token.or(previous_refresh),
-        expires_at: tokens.expires_in.map(|expires_in| now() + expires_in),
+        expires_at,
         revocation_endpoint: previous.and_then(|previous| previous.revocation_endpoint.clone()),
     }
+}
+
+/// Reads the `exp` claim from a JWT access token, if it is present and well
+/// formed. Used only to schedule refreshes; the token itself is still verified
+/// by the backend.
+fn jwt_expiry(token: &str) -> Option<i64> {
+    let payload = token.split('.').nth(1)?;
+    let claims: serde_json::Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
+    claims.get("exp")?.as_i64()
 }
 
 fn exchange_code(
@@ -722,6 +740,63 @@ mod tests {
         stored.refresh_token = None;
         let error = refresh(&stored).unwrap_err().to_string();
         assert!(error.contains("login"), "{error}");
+    }
+
+    #[test]
+    fn credentials_expiry_prefers_expires_in_then_the_jwt_exp_claim() {
+        let jwt = |exp: i64| {
+            let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"at+jwt"}"#);
+            let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#).as_bytes());
+            format!("{header}.{payload}.signature")
+        };
+        let build = |access_token: String, expires_in: Option<i64>| {
+            credentials_from(
+                "https://idp.example.com".to_owned(),
+                "cli",
+                "https://idp.example.com/token",
+                TokenResponse {
+                    access_token,
+                    refresh_token: None,
+                    expires_in,
+                },
+                None,
+            )
+        };
+
+        let explicit = build(jwt(1_700_000_000), Some(600));
+        let expected = now() + 600;
+        assert!(
+            (explicit.expires_at.expect("expires_at") - expected).abs() <= 2,
+            "expires_in must win over the JWT exp claim"
+        );
+
+        // Some IdPs omit `expires_in`; without a fallback the session would be
+        // treated as fresh forever and never refreshed.
+        let fallback = build(jwt(1_700_000_000), None);
+        assert_eq!(fallback.expires_at, Some(1_700_000_000));
+
+        let opaque = build("not-a-jwt".to_owned(), None);
+        assert_eq!(opaque.expires_at, None);
+    }
+
+    #[test]
+    fn jwt_expiry_ignores_malformed_tokens() {
+        assert_eq!(jwt_expiry("not-a-jwt"), None);
+        assert_eq!(jwt_expiry("header.!invalid.signature"), None);
+        assert_eq!(
+            jwt_expiry(&format!(
+                "header.{}.signature",
+                URL_SAFE_NO_PAD.encode(br#"{"sub":"x"}"#)
+            )),
+            None
+        );
+        assert_eq!(
+            jwt_expiry(&format!(
+                "header.{}.signature",
+                URL_SAFE_NO_PAD.encode(br#"{"exp":1700000000}"#)
+            )),
+            Some(1_700_000_000)
+        );
     }
 
     #[test]

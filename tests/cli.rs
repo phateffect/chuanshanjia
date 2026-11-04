@@ -141,7 +141,7 @@ fn config_creates_default_and_opens_editor() {
         .expect("default config should exist");
     assert_eq!(
         contents,
-        "base_url = \"\"\n# token = \"\"\n# issuer = \"https://oidc.example.com\"\n# client_id = \"chuanshanjia\"\nresource = \"\"\n# scope = \"openid profile email offline_access\"\n"
+        "base_url = \"\"\n# token = \"\"\n# issuer = \"https://oidc.example.com\"\n# client_id = \"chuanshanjia\"\nresource = \"\"\nscope = \"openid offline_access\"\n"
     );
 }
 
@@ -781,8 +781,8 @@ fn login_rejects_a_mismatched_state() {
     );
 
     let parameters = query_parameters(&authorize);
-    assert!(!parameters.contains_key("scope"));
-    assert!(!parameters.contains_key("prompt"));
+    assert_eq!(parameters["scope"], "openid offline_access");
+    assert_eq!(parameters["prompt"], "consent");
     let redirect = reqwest::Url::parse(&parameters["redirect_uri"]).unwrap();
     let port = redirect
         .port()

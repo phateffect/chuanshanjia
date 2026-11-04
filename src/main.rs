@@ -25,7 +25,11 @@ pub(crate) fn emit(line: impl std::fmt::Display) {
 // RFC 8252: the IdP ignores the port of a loopback redirect URI, so ask the OS
 // for a free one instead of squatting on a fixed port.
 const DEFAULT_REDIRECT_URI: &str = "http://127.0.0.1:0/callback";
-const DEFAULT_CONFIG: &str = "base_url = \"\"\n# token = \"\"\n# issuer = \"https://oidc.example.com\"\n# client_id = \"chuanshanjia\"\nresource = \"\"\n# scope = \"openid profile email offline_access\"\n";
+// Standard OIDC scopes only: `openid` identifies the login, `offline_access`
+// makes the IdP issue a refresh token. Business scopes are deliberately not
+// requested; the IdP derives them from the resource (RFC 8707).
+const DEFAULT_SCOPE: &str = "openid offline_access";
+const DEFAULT_CONFIG: &str = "base_url = \"\"\n# token = \"\"\n# issuer = \"https://oidc.example.com\"\n# client_id = \"chuanshanjia\"\nresource = \"\"\nscope = \"openid offline_access\"\n";
 
 /// Search logs through a chuanshanjia backend.
 #[derive(Cli)]
@@ -68,7 +72,8 @@ struct LoginArgs {
     #[usage(long)]
     redirect_uri: Option<String>,
 
-    /// Scopes to request; defaults to `scope` in the config and is omitted when unset.
+    /// Scopes to request; defaults to `scope` in the config, then
+    /// `openid offline_access`. Business scopes come from the IdP via `resource`.
     #[usage(long)]
     scope: Option<String>,
 
@@ -200,8 +205,6 @@ struct Config {
 struct ResourceMetadata {
     resource: String,
     authorization_servers: Vec<String>,
-    #[serde(default)]
-    scopes_supported: Vec<String>,
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -303,7 +306,6 @@ fn load_stored_token() -> Result<Option<String>> {
 fn validate_login_metadata(
     metadata: &ResourceMetadata,
     issuer: &str,
-    scope: Option<&str>,
     resource: &str,
 ) -> Result<()> {
     ensure!(
@@ -320,20 +322,12 @@ fn validate_login_metadata(
         "issuer {issuer:?} is not listed in backend authorization_servers {:?}",
         metadata.authorization_servers
     );
-    if let Some(scope) = scope {
-        let requested_scopes = scope.split_whitespace().collect::<Vec<_>>();
-        let missing_scopes = metadata
-            .scopes_supported
-            .iter()
-            .map(String::as_str)
-            .filter(|required| !requested_scopes.contains(required))
-            .collect::<Vec<_>>();
-        ensure!(
-            missing_scopes.is_empty(),
-            "scope does not include backend-required scope(s): {}",
-            missing_scopes.join(" ")
-        );
-    }
+    // `scopes_supported` advertises the business scopes the backend checks, but
+    // those are granted by the IdP based on the resource, not requested by the
+    // client, so they are deliberately not validated here. Since the token can
+    // only be obtained through the IdP, comparing the two would reject correct
+    // configurations and cannot verify anything the IdP does not already
+    // enforce.
     Ok(())
 }
 
@@ -373,7 +367,7 @@ fn check_login_config(
     ensure!(status.is_success(), "GET {url} returned {status}: {body}");
     let metadata: ResourceMetadata = serde_json::from_str(&body)
         .with_context(|| format!("invalid resource metadata at {url}"))?;
-    validate_login_metadata(&metadata, issuer, scope, resource)
+    validate_login_metadata(&metadata, issuer, resource)
 }
 
 fn login(args: LoginArgs) -> Result<()> {
@@ -387,7 +381,10 @@ fn login(args: LoginArgs) -> Result<()> {
         .client_id
         .or(config.client_id)
         .context("set `client_id` in the config file or pass --client-id")?;
-    let scope = args.scope.or(config.scope.clone());
+    let scope = args
+        .scope
+        .or(config.scope.clone())
+        .unwrap_or_else(|| DEFAULT_SCOPE.to_owned());
 
     let redirect_uri = args
         .redirect_uri
@@ -401,14 +398,14 @@ fn login(args: LoginArgs) -> Result<()> {
         &config.base_url,
         &issuer,
         &client_id,
-        scope.as_deref(),
+        Some(&scope),
         &resource,
     )
     .with_context(|| format!("login configuration check failed for {}", path.display()))?;
     let credentials = oidc::login(
         &issuer,
         &client_id,
-        scope.as_deref(),
+        Some(&scope),
         &redirect_uri,
         &[resource],
         !args.no_browser,
@@ -591,23 +588,19 @@ mod tests {
     }
 
     #[test]
-    fn login_metadata_must_match_resource_issuer_and_explicit_scopes() {
-        let mut metadata = ResourceMetadata {
-            resource: "https://logs.example.com".to_owned(),
-            authorization_servers: vec!["https://idp.example.com".to_owned()],
-            scopes_supported: vec!["logs:read".to_owned()],
-        };
-        validate_login_metadata(
-            &metadata,
-            "https://idp.example.com/",
-            Some("openid logs:read"),
-            "https://logs.example.com",
-        )
+    fn login_metadata_must_match_resource_and_issuer() {
+        // Business scopes are granted by the IdP from the resource, so a
+        // `scopes_supported` advertisement in the backend metadata must not
+        // gate the login flow, and is not even parsed.
+        let metadata: ResourceMetadata = serde_json::from_value(serde_json::json!({
+            "resource": "https://logs.example.com",
+            "authorization_servers": ["https://idp.example.com"],
+            "scopes_supported": ["logs:read", "logs:export"],
+        }))
         .unwrap();
         validate_login_metadata(
             &metadata,
-            "https://idp.example.com",
-            None,
+            "https://idp.example.com/",
             "https://logs.example.com",
         )
         .unwrap();
@@ -615,7 +608,6 @@ mod tests {
         let error = validate_login_metadata(
             &metadata,
             "https://idp.example.com",
-            Some("openid logs:read"),
             "https://other.example.com",
         )
         .unwrap_err();
@@ -625,25 +617,25 @@ mod tests {
                 .contains("does not match backend resource")
         );
 
-        metadata.authorization_servers = vec!["https://other.example.com".to_owned()];
+        let metadata: ResourceMetadata = serde_json::from_value(serde_json::json!({
+            "resource": "https://logs.example.com",
+            "authorization_servers": ["https://other.example.com"],
+        }))
+        .unwrap();
         let error = validate_login_metadata(
             &metadata,
             "https://idp.example.com",
-            Some("openid logs:read"),
             "https://logs.example.com",
         )
         .unwrap_err();
         assert!(error.to_string().contains("authorization_servers"));
+    }
 
-        metadata.authorization_servers = vec!["https://idp.example.com".to_owned()];
-        metadata.scopes_supported = vec!["logs:read".to_owned(), "logs:export".to_owned()];
-        let error = validate_login_metadata(
-            &metadata,
-            "https://idp.example.com",
-            Some("openid logs:read"),
-            "https://logs.example.com",
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("logs:export"));
+    #[test]
+    fn default_scope_requests_only_standard_oidc_scopes() {
+        assert_eq!(DEFAULT_SCOPE, "openid offline_access");
+        for business_like in ["chuanshanjia:read", "logs:read"] {
+            assert!(!DEFAULT_SCOPE.contains(business_like));
+        }
     }
 }

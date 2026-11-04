@@ -53,7 +53,7 @@ docs/design.md           # 设计文档
 - 测试不访问真实云服务：ES 用 mockito，SLS 用 `MockSlsClient`，外部命令用临时目录。新增行为先补测试。
 - **CLI 不保存 client_secret**：登录必须是公开客户端 + PKCE（S256）+ loopback 回调，`state` 必须校验。不要把 secret 打进二进制。
 - **OIDC 能力按实际 IdP 验证**：改动认证前通过 discovery 和测试确认 JWT access token、RFC 8707 resource、loopback redirect、offline access/refresh token 等支持；示例域名只是占位符。
-- **scope 配置必须一致**：CLI 缺省不发送 `scope`，由 IdP 决定默认授权；显式配置时，IdP 实际授权与 server 的 `oidc_required_scopes` 必须匹配，验签通过不代表拥有业务权限。
+- **scope 策略**：CLI 默认只请求标准 OIDC scope（`openid offline_access`），不请求业务 scope；业务 scope 由 IdP 按 `resource` 授予，Server 用 `oidc_required_scopes` 校验实际 token。不要为了“兼容”把业务 scope 写进 CLI 默认值，也不要用 `scopes_supported` 做登录前置条件（会让按 resource 授予的 IdP 全部误报）。验签通过不代表拥有业务权限。
 - **`aud` 校验不可放宽**：`server.oidc_audiences` 必须与 CLI 的 `resource`、IdP 的资源登记三处一致；测试覆盖了「缺失 aud」「其他 client 的 aud」被拒。
 - **凭证文件 `credentials.toml` 是程序产物**，Unix 下必须 `0600`；不要把它合进 `config.toml`。新增测试若跑真实登录，用独立的固定 `--port` 避免并行冲突，并传 `--no-browser`。
 - clippy `-D warnings` 零容忍；edition 2024 语法（let-chains 等）可用。
