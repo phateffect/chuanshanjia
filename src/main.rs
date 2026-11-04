@@ -25,7 +25,7 @@ pub(crate) fn emit(line: impl std::fmt::Display) {
 // RFC 8252: the IdP ignores the port of a loopback redirect URI, so ask the OS
 // for a free one instead of squatting on a fixed port.
 const DEFAULT_REDIRECT_URI: &str = "http://127.0.0.1:0/callback";
-const DEFAULT_CONFIG: &str = "base_url = \"\"\n# token = \"\"\n# issuer = \"https://oidc.example.com\"\n# client_id = \"chuanshanjia\"\nresource = \"\"\n# scope = \"openid profile email offline_access logs:read\"\n";
+const DEFAULT_CONFIG: &str = "base_url = \"\"\n# token = \"\"\n# issuer = \"https://oidc.example.com\"\n# client_id = \"chuanshanjia\"\nresource = \"\"\n# scope = \"openid profile email offline_access\"\n";
 
 /// Search logs through a chuanshanjia backend.
 #[derive(Cli)]
@@ -68,7 +68,7 @@ struct LoginArgs {
     #[usage(long)]
     redirect_uri: Option<String>,
 
-    /// Scopes to request; defaults to `scope` in the config or the built-in set.
+    /// Scopes to request; defaults to `scope` in the config and is omitted when unset.
     #[usage(long)]
     scope: Option<String>,
 
@@ -303,7 +303,7 @@ fn load_stored_token() -> Result<Option<String>> {
 fn validate_login_metadata(
     metadata: &ResourceMetadata,
     issuer: &str,
-    scope: &str,
+    scope: Option<&str>,
     resource: &str,
 ) -> Result<()> {
     ensure!(
@@ -320,18 +320,20 @@ fn validate_login_metadata(
         "issuer {issuer:?} is not listed in backend authorization_servers {:?}",
         metadata.authorization_servers
     );
-    let requested_scopes = scope.split_whitespace().collect::<Vec<_>>();
-    let missing_scopes = metadata
-        .scopes_supported
-        .iter()
-        .map(String::as_str)
-        .filter(|required| !requested_scopes.contains(required))
-        .collect::<Vec<_>>();
-    ensure!(
-        missing_scopes.is_empty(),
-        "scope does not include backend-required scope(s): {}",
-        missing_scopes.join(" ")
-    );
+    if let Some(scope) = scope {
+        let requested_scopes = scope.split_whitespace().collect::<Vec<_>>();
+        let missing_scopes = metadata
+            .scopes_supported
+            .iter()
+            .map(String::as_str)
+            .filter(|required| !requested_scopes.contains(required))
+            .collect::<Vec<_>>();
+        ensure!(
+            missing_scopes.is_empty(),
+            "scope does not include backend-required scope(s): {}",
+            missing_scopes.join(" ")
+        );
+    }
     Ok(())
 }
 
@@ -339,10 +341,13 @@ fn check_login_config(
     base_url: &str,
     issuer: &str,
     client_id: &str,
-    scope: &str,
+    scope: Option<&str>,
     resource: &str,
 ) -> Result<()> {
     ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
+    if let Some(scope) = scope {
+        ensure!(!scope.trim().is_empty(), "scope must not be empty when set");
+    }
     let issuer_url = reqwest::Url::parse(issuer).context("invalid issuer")?;
     ensure!(
         matches!(issuer_url.scheme(), "http" | "https"),
@@ -382,11 +387,7 @@ fn login(args: LoginArgs) -> Result<()> {
         .client_id
         .or(config.client_id)
         .context("set `client_id` in the config file or pass --client-id")?;
-    // Keep requested scopes, IdP grants, and backend requirements aligned.
-    let scope = args
-        .scope
-        .or(config.scope.clone())
-        .unwrap_or_else(|| oidc::default_scope().to_owned());
+    let scope = args.scope.or(config.scope.clone());
 
     let redirect_uri = args
         .redirect_uri
@@ -396,12 +397,18 @@ fn login(args: LoginArgs) -> Result<()> {
         .resource
         .or(config.resource.clone())
         .context("set `resource` in the config file or pass --resource")?;
-    check_login_config(&config.base_url, &issuer, &client_id, &scope, &resource)
-        .with_context(|| format!("login configuration check failed for {}", path.display()))?;
+    check_login_config(
+        &config.base_url,
+        &issuer,
+        &client_id,
+        scope.as_deref(),
+        &resource,
+    )
+    .with_context(|| format!("login configuration check failed for {}", path.display()))?;
     let credentials = oidc::login(
         &issuer,
         &client_id,
-        &scope,
+        scope.as_deref(),
         &redirect_uri,
         &[resource],
         !args.no_browser,
@@ -584,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn login_metadata_must_match_resource_issuer_and_required_scopes() {
+    fn login_metadata_must_match_resource_issuer_and_explicit_scopes() {
         let mut metadata = ResourceMetadata {
             resource: "https://logs.example.com".to_owned(),
             authorization_servers: vec!["https://idp.example.com".to_owned()],
@@ -593,7 +600,14 @@ mod tests {
         validate_login_metadata(
             &metadata,
             "https://idp.example.com/",
-            "openid logs:read",
+            Some("openid logs:read"),
+            "https://logs.example.com",
+        )
+        .unwrap();
+        validate_login_metadata(
+            &metadata,
+            "https://idp.example.com",
+            None,
             "https://logs.example.com",
         )
         .unwrap();
@@ -601,7 +615,7 @@ mod tests {
         let error = validate_login_metadata(
             &metadata,
             "https://idp.example.com",
-            "openid logs:read",
+            Some("openid logs:read"),
             "https://other.example.com",
         )
         .unwrap_err();
@@ -615,7 +629,7 @@ mod tests {
         let error = validate_login_metadata(
             &metadata,
             "https://idp.example.com",
-            "openid logs:read",
+            Some("openid logs:read"),
             "https://logs.example.com",
         )
         .unwrap_err();
@@ -626,7 +640,7 @@ mod tests {
         let error = validate_login_metadata(
             &metadata,
             "https://idp.example.com",
-            "openid logs:read",
+            Some("openid logs:read"),
             "https://logs.example.com",
         )
         .unwrap_err();

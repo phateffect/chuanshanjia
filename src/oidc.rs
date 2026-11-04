@@ -24,9 +24,6 @@ use sha2::{Digest, Sha256};
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 const EXPIRY_SKEW: i64 = 60;
-// OIDC scopes plus the business scope this service needs. The IdP grants no
-// business permission unless the request names the scope explicitly.
-const DEFAULT_SCOPE: &str = "openid profile email offline_access logs:read";
 
 #[derive(Deserialize)]
 struct Discovery {
@@ -160,7 +157,7 @@ fn discover(http: &reqwest::blocking::Client, issuer: &str) -> Result<(Discovery
 pub fn login(
     issuer: &str,
     client_id: &str,
-    scope: &str,
+    scope: Option<&str>,
     redirect_uri: &str,
     resources: &[String],
     open: bool,
@@ -216,16 +213,18 @@ pub fn login(
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
         .append_pair("redirect_uri", redirect_uri)
-        .append_pair("scope", scope)
         .append_pair("state", &state)
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256");
-    // IdPs commonly only issue a refresh token when consent is explicit.
-    if scope
-        .split_whitespace()
-        .any(|scope| scope == "offline_access")
-    {
-        authorize.query_pairs_mut().append_pair("prompt", "consent");
+    if let Some(scope) = scope {
+        authorize.query_pairs_mut().append_pair("scope", scope);
+        // IdPs commonly only issue a refresh token when consent is explicit.
+        if scope
+            .split_whitespace()
+            .any(|scope| scope == "offline_access")
+        {
+            authorize.query_pairs_mut().append_pair("prompt", "consent");
+        }
     }
     // RFC 8707: the audience of the access token is the requested resource.
     for resource in resources {
@@ -525,10 +524,6 @@ fn open_browser(url: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
-}
-
-pub fn default_scope() -> &'static str {
-    DEFAULT_SCOPE
 }
 
 #[cfg(test)]
