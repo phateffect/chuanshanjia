@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-cli:
+    name: Build CLI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            extension: ""
+          - os: windows-latest
+            extension: .exe
+          - os: macos-latest
+            extension: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - run: mise exec -- cargo build --locked --release --package chuanshanjia --bin chuanshanjia
+      - name: Stage binary
+        shell: bash
+        run: |
+          TRIPLE=$(mise exec -- rustc -vV | sed -n 's/^host: //p')
+          mkdir -p dist
+          cp "target/release/chuanshanjia${{ matrix.extension }}" \
+             "dist/chuanshanjia-${GITHUB_REF_NAME}-${TRIPLE}${{ matrix.extension }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-${{ runner.os }}-${{ runner.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  build-server:
+    name: Build Server (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - run: mise exec -- cargo build --locked --release --package chuanshanjia-backend --bin chuanshanjia-server
+      - name: Stage binary
+        run: |
+          TRIPLE=$(mise exec -- rustc -vV | sed -n 's/^host: //p')
+          mkdir -p dist
+          cp target/release/chuanshanjia-server \
+             "dist/chuanshanjia-server-${GITHUB_REF_NAME}-${TRIPLE}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: server-${{ runner.os }}-${{ runner.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [build-cli, build-server]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
