@@ -1,6 +1,7 @@
 pub mod es;
 pub mod service;
 pub mod sls;
+pub mod tls;
 
 use async_trait::async_trait;
 use axum::{

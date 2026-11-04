@@ -97,6 +97,14 @@ pub enum StorageConfig {
     Elasticsearch {
         base_url: String,
     },
+    VolcesTls {
+        region: String,
+        /// Defaults to the public endpoint `https://tls-{region}.volces.com`.
+        endpoint: Option<String>,
+        access_key_id: Credential,
+        access_key_secret: Credential,
+        security_token: Option<Credential>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -380,7 +388,51 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_providers_are_rejected() {
+    fn volces_tls_storage_is_supported() {
+        let config: AppConfig = toml::from_str(
+            r#"
+            [server]
+            oidc_issuer = "https://idp.example.com"
+            oidc_audiences = ["test-audience"]
+
+            [storages.test]
+            provider = "volces-tls"
+            region = "cn-beijing"
+            endpoint = "https://tls-cn-beijing.ivolces.com"
+            access_key_id = "test-id"
+            access_key_secret = { env = "TLS_TEST_ACCESS_KEY_SECRET" }
+            "#,
+        )
+        .unwrap();
+
+        let StorageConfig::VolcesTls {
+            region,
+            endpoint,
+            access_key_id,
+            access_key_secret,
+            security_token,
+        } = &config.storages["test"]
+        else {
+            panic!("expected Volces TLS storage");
+        };
+        assert_eq!(region, "cn-beijing");
+        assert_eq!(
+            endpoint.as_deref(),
+            Some("https://tls-cn-beijing.ivolces.com")
+        );
+        assert_eq!(access_key_id.resolve("test.id").unwrap(), "test-id");
+        assert_eq!(
+            access_key_secret
+                .resolve("test.secret")
+                .unwrap_err()
+                .to_string(),
+            "failed to read test.secret from environment variable TLS_TEST_ACCESS_KEY_SECRET"
+        );
+        assert!(security_token.is_none());
+    }
+
+    #[test]
+    fn volces_tls_topic_is_not_a_storage_field() {
         let Err(error) = toml::from_str::<AppConfig>(
             r#"
             [server]
@@ -389,6 +441,28 @@ mod tests {
 
             [storages.test]
             provider = "volces-tls"
+            region = "cn-beijing"
+            access_key_id = "test-id"
+            access_key_secret = "test-secret"
+            topic_id = "unexpected"
+            "#,
+        ) else {
+            panic!("topic_id must be rejected; the TLS topic belongs to service.index");
+        };
+
+        assert!(error.to_string().contains("unknown field `topic_id`"));
+    }
+
+    #[test]
+    fn unsupported_providers_are_rejected() {
+        let Err(error) = toml::from_str::<AppConfig>(
+            r#"
+            [server]
+            oidc_issuer = "https://idp.example.com"
+            oidc_audiences = ["test-audience"]
+
+            [storages.test]
+            provider = "opensearch"
             "#,
         ) else {
             panic!("unsupported providers must be rejected");

@@ -6,12 +6,12 @@
 - **`chuanshanjia-server`**：独立 HTTP 后端，负责 service 路由、预置查询条件和 provider 调用。
 
 ```
-Agent ──chuanshanjia CLI──▶ chuanshanjia-server ──▶ Elasticsearch / 阿里云 SLS
+Agent ──chuanshanjia CLI──▶ chuanshanjia-server ──▶ Elasticsearch / 阿里云 SLS / 火山云 TLS
         ~/.config/.../          server.toml
         config.toml             oidc_issuer ──▶ 自建 OIDC (JWKS)
 ```
 
-当前支持 Elasticsearch 和阿里云 SLS；火山云 TLS 尚未实现。
+当前支持 Elasticsearch、阿里云 SLS 和火山云 TLS。
 
 - 设计文档：[docs/design.md](docs/design.md)
 
@@ -172,20 +172,20 @@ chuanshanjia login --no-browser      # 只打印授权 URL，不自动开浏览�
 
 - **需要在 IdP 上注册一个公开客户端**（token 认证方式 `none`，启用 PKCE），重定向 URI 写 `http://127.0.0.1/callback` 即可——按 RFC 8252，IdP 会忽略 loopback 回调的端口，因此 CLI 默认使用 `http://127.0.0.1:0/callback`（由系统挑空闲端口，避免并发登录抢端口）。
 - 少数 IdP 仍对重定向 URI 做精确匹配；那时需在配置项 `redirect_uri` 或用 `--redirect-uri` 指定一个注册过的固定端口（如 `http://127.0.0.1:8765/callback`）。
-- **scope 缺省交给 IdP**：未配置且未传 `--scope` 时，授权请求不携带 `scope` 参数，由 IdP 根据 client 和 resource 决定默认授权；需要覆盖时用配置项 `scope` 或 `--scope` 指定整串 scope。
-- 显式 scope 带 `offline_access` 时会附加 `prompt=consent`；缺省时是否下发 `refresh_token` 由 IdP 的默认授权决定。无论 scope 是否显式配置，IdP 实际授予的 scope 都必须满足 Server 的 `oidc_required_scopes`，否则查询仍会返回 401。
+- **scope 只请求标准 OIDC 项**：CLI 默认请求 `scope = "openid offline_access"`，不请求任何业务 scope。`openid` 标识一次 OIDC 登录，`offline_access` 让 IdP 下发 `refresh_token`；业务 scope（如 `chuanshanjia:read`）由 IdP 按 `resource` 授予，客户端无从得知也不应硬编码。配置项 `scope` 或 `--scope` 可整体覆盖这一默认值。
+- **默认带 `offline_access`**，因此授权请求会自动附加 `prompt=consent`（IdP 通常要求显式同意才发 refresh token）。无论请求什么 scope，IdP 实际授予的 scope 都必须满足 Server 的 `oidc_required_scopes`，否则查询仍会返回 401。
 - token 存在 `~/.config/chuanshanjia/credentials.toml`，权限 `0600`。
 - **resource（RFC 8707）没有内置默认值**：必须在配置中设置 `resource` 或传入 `--resource`。登录时会把 `resource` 传给授权端点与 token 端点，IdP 据此把 access token 的 `aud` 设成该值；**必须与 `server.oidc_audiences` 和 IdP 上的资源登记完全一致**。
-- **登录前检查配置**：CLI 先请求 `base_url` 下的 `/.well-known/oauth-protected-resource`，检查 `resource` 是否匹配、`issuer` 是否属于 `authorization_servers`；只有显式指定 scope 时，才检查它是否覆盖 `scopes_supported`，缺省则交给 IdP 默认授权。检查失败或 Server 元数据不可用时不会进入 OIDC 授权流程。
+- **登录前检查配置**：CLI 先请求 `base_url` 下的 `/.well-known/oauth-protected-resource`，检查 `resource` 是否匹配、`issuer` 是否属于 `authorization_servers`。**不校验** `scopes_supported`：那里面是 Server 要检查的业务 scope，由 IdP 按 resource 授予，与客户端请求的 scope 无关，拿两者比对只会误报。检查失败或 Server 元数据不可用时不会进入 OIDC 授权流程。
 - **access_token 必须是 JWT**：OIDC 本地登录会话只使用 JWT 形态的 `access_token`；不透明或格式不符时报错。
-- `search` 的 token 优先级：`--token` > 本地登录会话 > 配置文件的 `token`；会话过期时先用 `refresh_token` 静默续期并回写文件，续不了则提示重新 `login`。
+- `search` 的 token 优先级：`--token` > 本地登录会话 > 配置文件的 `token`；会话过期时先用 `refresh_token` 静默续期并回写文件，续不了则提示重新 `login`。过期时间以 IdP 返回的 `expires_in` 为准；IdP 在 code 兑换时不返回该字段时，退回按 access token 的 JWT `exp` 判断，避免把短命 token 当成永久有效而不去续期。
 
 ## Server 配置
 
 配置结构分三层：
 
-- **storage** 定义实际日志服务的连接和凭证。当前 provider 为 `aliyun-sls` 和 `elasticsearch`。
-- **service** 是搜索入口；`storage` 引用 storage 名称，`index` 是实际 ES 索引或 SLS Logstore。
+- **storage** 定义实际日志服务的连接和凭证。当前 provider 为 `aliyun-sls`、`elasticsearch` 和 `volces-tls`。
+- **service** 是搜索入口；`storage` 引用 storage 名称，`index` 是实际 ES 索引、SLS Logstore 或 TLS 日志主题 ID（Topic ID）。
 - service 可配置 `filters` 和 `keyword` 作为预置查询条件。请求可以追加其他 filter，但同名字段及 keyword 始终以预置值为准，不会隐式拼接关键词。
 
 Elasticsearch storage 示例：
@@ -194,6 +194,24 @@ Elasticsearch storage 示例：
 [storages.es]
 provider = "elasticsearch"
 base_url = "http://127.0.0.1:9200"
+```
+
+火山云 TLS storage 示例（无官方 Rust SDK，请求按[火山引擎签名机制](https://www.volcengine.com/docs/6470/112168)直接调用 OpenAPI）：
+
+```toml
+[storages.tls]
+provider = "volces-tls"
+region = "cn-beijing"
+# 可选；缺省按公网地址 https://tls-{region}.volces.com 连接。
+# 内网部署可显式指定 https://tls-{region}.ivolces.com。
+# endpoint = "https://tls-cn-beijing.ivolces.com"
+access_key_id = { env = "TLS_ACCESS_KEY_ID" }
+access_key_secret = { env = "TLS_ACCESS_KEY_SECRET" }
+# security_token = { env = "TLS_SECURITY_TOKEN" }   # STS 临时凭证
+
+[services.foo]
+storage = "tls"
+index = "your-topic-id"   # TLS 日志主题 ID
 ```
 
 所有配置节均拒绝未知字段；`server.oidc_issuer` 不是绝对 http(s) URL、service 引用不存在的 storage、凭证缺失、`json_fields`/`ignores` 路径非法时，Server 启动失败。
@@ -262,8 +280,8 @@ curl http://127.0.0.1:3000/foo/_search \
 
 - `logs` 直接是日志对象数组，`json_fields` 解析和 `ignores` 删除会作用于这些对象。
 - `count` 是本次实际返回条数，不是全部匹配数。
-- `took` 可选，单位毫秒：SLS 为所有分页请求的总耗时，ES 为上游 `took`。
-- `complete` 可选：SLS 表示所有分页均为 `Complete`，ES 表示未发生 `timed_out`。
+- `took` 可选，单位毫秒：SLS 为所有分页请求的总耗时，ES 为上游 `took`，TLS 为各页 `ElapsedMillisecond` 之和。
+- `complete` 可选：SLS 表示所有分页均为 `Complete`，ES 表示未发生 `timed_out`，TLS 表示所有分页 `ResultStatus` 均为 `complete` 且最后一页 `ListOver` 为 `true`。
 
 ### 错误响应
 
@@ -273,12 +291,13 @@ curl http://127.0.0.1:3000/foo/_search \
 | --- | --- | --- |
 | 400 | `invalid_time_range` | `start >= end` 或时间无法换算 |
 | 400 | `unsupported_sls_filter` | SLS filter 值为 null/数组/对象 |
+| 400 | `unsupported_tls_filter` | TLS filter 值为 null/数组/对象 |
 | 401 | `invalid_token` | JWT 缺失或无效（缺失时无响应体） |
 | 404 | `service_not_found` | 未配置的 service |
 | 501 | `provider_not_configured` | Server 未配置 provider |
-| 502 | `es_request_failed` / `invalid_es_response` / `sls_request_failed` | 上游网络/凭证/解码失败 |
+| 502 | `es_request_failed` / `invalid_es_response` / `sls_request_failed` / `tls_request_failed` / `invalid_tls_response` | 上游网络/凭证/解码失败 |
 
-ES 与 SLS 的服务端错误保留上游 HTTP 状态码和错误体（SLS 附带 request ID）。请求体 JSON 非法返回 400，包含未知字段返回 422。
+ES 与 TLS 的服务端错误保留上游 HTTP 状态码和错误体；SLS 与 TLS 附带 request ID。请求体 JSON 非法返回 400，包含未知字段返回 422。
 
 ## JWT 认证（OIDC）
 
@@ -327,6 +346,22 @@ CLI 侧用 `chuanshanjia login` 获取 token（见上文），也可在配置文
 
 更多语法参考：[SLS 查询语法](https://help.aliyun.com/zh/sls/query-syntax/)、[GetLogs 分页方式](https://help.aliyun.com/zh/sls/paged-query)。
 
+### 火山云 TLS
+
+TLS 没有官方 Rust SDK，Server 用 reqwest 直接调用 `POST /SearchLogs`（`x-tls-apiversion: 0.3.0`），并按[火山引擎签名机制](https://www.volcengine.com/docs/6470/112168)（HMAC-SHA256，服务名 `TLS`）对请求签名；`service.index` 填日志主题 ID（Topic ID）。
+
+- keywords 和 filter 都转换为 [TLS 检索语法](https://www.volcengine.com/docs/6470/1206705)，空查询使用 `*`。多个条件按 AND 组合，例如：
+
+  ```text
+  "connection timeout" AND attempt:2 AND retryable:true AND service:"order"
+  ```
+
+- 字符串值（含 keywords）使用双引号并转义 `\` 和 `"`；纯字母数字下划线的字段名原样传递，含其他字符的字段名按官方文档用双引号包裹；数字和布尔值保留原生标量形式。
+- 字段需要配置键值索引；分词和匹配行为由索引配置决定。
+- 时间范围为 `[start, end)`，请求时转换为毫秒时间戳；`Sort` 固定为 `desc`（时间逆序，新日志在前）。
+- 自动翻页：每页 `Limit=100`，未返回全部结果（`ListOver=false`）且页满时携带上一页 `Context` 续查，最多 10 页、单次最多返回 1000 条。
+- `logs` 保留返回的原始字段名和取值；`__path__`、`__source__` 等元数据字段可用 `ignores` 清理。
+
 ## 开发与验证
 
 ```sh
@@ -336,12 +371,11 @@ mise run lint
 mise run build
 ```
 
-测试覆盖 CLI 参数、Bearer token 传递、OIDC 发现与 JWKS 处理（含 `iss` 校验、未知 kid 刷新、刷限频）、Ed25519 JWT 验证、验证结果缓存、RFC 6750 401 响应、时间解析、provider 查询转换，以及 CLI → Server → 模拟 ES 的端到端链路；不读取真实用户配置，也不请求真实云服务。GitHub Actions 检查配置见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
+测试覆盖 CLI 参数、Bearer token 传递、OIDC 发现与 JWKS 处理（含 `iss` 校验、未知 kid 刷新、刷限频）、Ed25519 JWT 验证、验证结果缓存、RFC 6750 401 响应、时间解析、provider 查询转换（含 TLS 签名参考向量、分页与错误映射），以及 CLI → Server → 模拟 ES 的端到端链路；不读取真实用户配置，也不请求真实云服务。GitHub Actions 检查配置见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
 同一 GitHub Actions workflow 会并行构建 Windows/Linux/macOS CLI 与 Linux Server 的 release binary，并上传为 workflow artifacts。Windows/Linux 产物为 x86_64；macOS 产物为 ARM64（Apple Silicon）。
 
 ## 当前限制
 
-- 火山云 TLS 尚未实现，示例中的相关配置仅作预留。
 - `lookups` 仅为配置概念，尚未实现；`ignores` 不支持删除数组元素。
-- API 未提供分页、排序和聚合参数，也不支持 `bool`、`must` 等完整 ES 查询语法；SLS 每次最多返回 1000 条。
+- API 未提供分页、排序和聚合参数，也不支持 `bool`、`must` 等完整 ES 查询语法；SLS 与 TLS 每次最多返回 1000 条，TLS 固定按时间逆序返回。

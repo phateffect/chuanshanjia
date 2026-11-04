@@ -4,7 +4,7 @@
 
 ## 1. 背景与目标
 
-微服务环境下的日志分散在多个 Elasticsearch、阿里云 SLS 等系统中，检索语法、认证方式和字段结构各不相同。目标是为 Agent（以及人）提供一条**可组合、稳定、少惊扰**的日志查询链路：
+微服务环境下的日志分散在多个 Elasticsearch、阿里云 SLS、火山云 TLS 等系统中，检索语法、认证方式和字段结构各不相同。目标是为 Agent（以及人）提供一条**可组合、稳定、少惊扰**的日志查询链路：
 
 - Agent 只需面对一个极简 CLI（`chuanshanjia search <service> -f k=v -k kw`）和一个统一 JSON 响应。
 - 运维侧通过 Server 配置固化 service 路由、预置过滤条件和字段清洗规则，Agent 无需了解底层是 ES 还是 SLS。
@@ -30,7 +30,8 @@
                                               │   ├─ ignores 删除                  │
                                               │   └─ SearchProvider trait           │
                                               │       ├─ EsProvider ─▶ Elasticsearch
-                                              │       └─ SlsProvider ─▶ 阿里云 SLS
+                                              │       ├─ SlsProvider ─▶ 阿里云 SLS
+                                              │       └─ TlsProvider ─▶ 火山云 TLS
                                               └───────────┬──────────────────────────┘
                                                           │ 启动发现 + 未知 kid 刷新
                                                           ▼
@@ -55,6 +56,7 @@ backend 库内部模块：
 | `provider/service.rs` | `ServiceProvider`：service → storage 路由、预置条件合并、`json_fields`/`ignores` 清洗管线、对象路径解析 |
 | `provider/es.rs` | ES 查询翻译与响应归一化 |
 | `provider/sls.rs` | SLS 原生查询构造、分页拉取与响应归一化 |
+| `provider/tls.rs` | 火山云 TLS：火山引擎 V4 签名、SearchLogs 调用、Context 分页与响应归一化 |
 
 ## 3. 关键设计决策
 
@@ -90,7 +92,7 @@ service 可配置 `filters` 和 `keyword`。合并规则：
 
 - `logs` 直接是日志对象数组，去掉 ES `hits.hits._source` 包装（无 `_source` 时退用 hit 本身）。
 - `count` 是本次返回条数，**不是**总匹配数（不做额外 count 查询）。
-- `took`/`complete` 为可选：SLS 的 `took` 是本地计时的所有分页总耗时，ES 直接取上游 `took`；`complete` 在 SLS 表示所有分页 `Complete`，在 ES 表示未 `timed_out`。字段缺失即信息缺失，不造默认值。
+- `took`/`complete` 为可选：SLS 的 `took` 是本地计时的所有分页总耗时，ES 直接取上游 `took`，TLS 汇总各页 `ElapsedMillisecond`；`complete` 在 SLS 表示所有分页 `Complete`，在 ES 表示未 `timed_out`，在 TLS 表示所有分页 `ResultStatus=complete` 且最后一页 `ListOver=true`（触及 1000 条上限或上游只返回部分结果时如实报 `false`）。字段缺失即信息缺失，不造默认值。
 
 ### 3.4 输出清洗管线：parse → ignore
 
@@ -139,9 +141,9 @@ service 可配置 `filters` 和 `keyword`。合并规则：
 
 `ProviderError` 统一输出 `{"error": {"type": ..., "reason": ...}, "status": ...}`：
 
-- **业务错误**（4xx）：`service_not_found`、`invalid_time_range`、`unsupported_sls_filter`，由本层生成。
-- **上游错误**：ES 非 2xx 响应原样保留状态码和 JSON 错误体；SLS `Server` 错误保留 HTTP 状态与 `error_code`，`request_id` 拼进 reason 便于找阿里云排查。
-- **基础设施错误**：网络失败、凭证无效、响应解码失败统一 502（`es_request_failed`/`invalid_es_response`/`sls_request_failed`），reason 去掉 URL（含凭证信息）。
+- **业务错误**（4xx）：`service_not_found`、`invalid_time_range`、`unsupported_sls_filter`、`unsupported_tls_filter`，由本层生成。
+- **上游错误**：ES 非 2xx 响应原样保留状态码和 JSON 错误体；SLS `Server` 错误保留 HTTP 状态与 `error_code`，`request_id` 拼进 reason 便于找阿里云排查；TLS 非 2xx 且错误体含 `ErrorCode`/`ErrorMessage` 时保留状态码与错误码，`X-Tls-Requestid` 拼进 reason，否则原样透传错误体。
+- **基础设施错误**：网络失败、凭证无效、响应解码失败统一 502（`es_request_failed`/`invalid_es_response`/`sls_request_failed`/`tls_request_failed`/`invalid_tls_response`），reason 去掉 URL（含凭证信息）。
 
 401 响应遵循 RFC 6750：缺凭证时无响应体，仅 `WWW-Authenticate: Bearer realm="chuanshanjia"`；token 无效时附 `error="invalid_token"` 与 JSON 错误体。
 
@@ -156,7 +158,7 @@ pub trait SearchProvider: Send + Sync {
 }
 ```
 
-`ServiceProvider` 持有 storage 名 → provider 实例的映射；service 引用 storage，多个 service 可复用同一 storage。测试用 `MockProvider`/`MockSlsClient` 替换真实实现。
+`ServiceProvider` 持有 storage 名 → provider 实例的映射；service 引用 storage，多个 service 可复用同一 storage。测试用 `MockProvider`/`MockSlsClient` 替换真实实现，ES 与 TLS 走 mockito 模拟 HTTP 上游。
 
 ### 4.1 Elasticsearch
 
@@ -172,6 +174,14 @@ pub trait SearchProvider: Send + Sync {
 - **分页策略**：每页 `line=100`，`offset += 100` 翻页；页面不满 100 条或累计达到 1000 条（10 页）即停。`complete` 汇总所有页的 `Complete` 状态，向调用方诚实暴露“可能没拉全”。
 - `__pack_meta__` 等元数据随 `with_pack_meta` 返回，再由 `ignores` 清理。
 
+### 4.3 火山云 TLS
+
+- 无官方 Rust SDK，用 reqwest 直连 `POST /SearchLogs`（`x-tls-apiversion: 0.3.0`），按[火山引擎签名机制](https://www.volcengine.com/docs/6470/112168)对每个请求签名：HMAC-SHA256，服务名固定 `TLS`，scope 为 `{date}/{region}/TLS/request`，signed headers 为 `content-type;host;x-content-sha256;x-date[;x-security-token];x-tls-apiversion`，密钥链 HMAC(SK, date)→region→service→`request`。签名实现与官方 Go/Python SDK 逐字对齐，并用独立实现的参考向量单测锁定；凭证在启动时从配置解析（含 STS `security_token`），不进日志。
+- `service.index` 即 Topic ID。`StartTime`/`EndTime` 由 epoch seconds 乘 1000 得到（API 要求毫秒），`Limit=100`、`Sort=desc`（时间逆序，新日志在前）。
+- 查询构造为 [TLS 检索语法](https://www.volcengine.com/docs/6470/1206705)：`"keywords" AND key:value`。空查询用 `*`；空字符串 keywords 视为未提供；字符串统一双引号并转义 `\` 与 `"`（官方文档：引号内仅需转义这两者）；纯 `[A-Za-z0-9_]` 字段名原样传递，含特殊字符的字段名按文档用双引号包裹；数字/布尔保留标量形式；null/数组/对象值 400 拒绝（`unsupported_tls_filter`）。字段匹配依赖 TLS 键值索引配置，分词行为不在本层控制。
+- **分页策略**：Context 游标翻页——上一页 `ListOver=false` 且页满 100 条且未达 1000 条上限时，携带上一页 `Context` 续查；`complete` 要求所有页 `ResultStatus=complete` 且最后一页 `ListOver=true`，`took` 汇总各页 `ElapsedMillisecond`。
+- 错误映射见 3.7；`__path__`、`__source__` 等元数据字段由 `ignores` 清理。
+
 ## 5. CLI 设计
 
 - 依赖面最小：usage-rs 定义参数，reqwest blocking 发请求；无运行时服务、无后台状态。
@@ -185,14 +195,14 @@ pub trait SearchProvider: Send + Sync {
 
 信任链只有一条：**CLI 向 IdP 登录拿 token，Server 拿 IdP 的公钥验 token**。Server 不签发 token——否则它就要自己管签名密钥、轮换、续期、吊销和用户映射，等于重造一个 IdP，还多一跳信任跳跃。
 
-- **登录前配置检查**：`resource` 没有内置默认值，必须由配置或 `--resource` 显式提供。CLI 先读取 `base_url` 下的 RFC 9728 资源元数据，核对 `resource` 与 `authorization_servers` 中的 issuer；仅当显式指定 scope 时，才检查它是否覆盖 `scopes_supported`。任一检查失败或元数据不可用都不进入 OIDC 授权流程。这样本地配置错误会在打开浏览器前暴露，但不能替代 IdP 对 resource 的登记检查。
+- **登录前配置检查**：`resource` 没有内置默认值，必须由配置或 `--resource` 显式提供。CLI 先读取 `base_url` 下的 RFC 9728 资源元数据，核对 `resource` 与 `authorization_servers` 中的 issuer；**不** 比对 `scopes_supported`——其中的业务 scope 由 IdP 按 resource 授予，与客户端请求的 scope 无关，比对只会把正确配置判成错误。任一 `resource`/issuer 检查失败或元数据不可用都不进入 OIDC 授权流程。这样本地配置错误会在打开浏览器前暴露，但不能替代 IdP 对 resource 的登记检查。
 - **授权码 + PKCE（S256）+ 公开客户端**：CLI 无法保守 secret（二进制里必然泄漏），所以用 `token_endpoint_auth_method = none` + PKCE；IdP 侧注册公开客户端，重定向 URI 使用 loopback callback。`state` 与 PKCE `code_verifier` 均每次随机生成，回调里先校 `state` 再换 token。
 - **随机 loopback 端口**：按 RFC 8252，IdP 匹配 loopback `redirect_uri` 时忽略端口，因此默认 `http://127.0.0.1:0/callback`——`:0` 让系统挑空闲端口，实际端口再写进授权请求。这样并发登录不会抢端口，也不需要预注册固定端口。监听端口始终从 `redirect_uri` 推导；需要固定端口时用 `--redirect-uri http://127.0.0.1:8765/callback`。
 - **JWT access token**：OIDC 本地登录会话只使用 JWT 形态的 `access_token`；不透明或格式不符时报错，因为 Server 只支持离线验签。
-- **scope 与 consent**：未配置且未传 `--scope` 时完全省略授权请求的 `scope` 参数，由 IdP 根据 client 和 resource 决定默认授权，不内置业务 scope。显式 scope 带 `offline_access` 时附加 `prompt=consent`；缺省时是否返回 `refresh_token` 由 IdP 决定。
-- **业务 scope 由 IdP 实际授予**：实际签发的 scope 取决于请求（或缺省授权）和 IdP 配置。无论是否显式申请，Server 都可用 `oidc_required_scopes` 检查实际 token，验签通过不代表拥有业务权限。
+- **scope 与 consent**：CLI 默认请求 `scope = "openid offline_access"`，只含标准 OIDC scope，不含任何业务 scope；配置项 `scope` 或 `--scope` 可整体覆盖。`offline_access` 用于取得 `refresh_token`，带它时附加 `prompt=consent`（IdP 通常要求显式同意才下发 refresh token）。既然客户端不请求业务 scope，业务授权就只能由 IdP 根据 `resource` 决定——这也是 CLI 不再把 `scopes_supported` 当作前置条件的理由。
+- **业务 scope 由 IdP 实际授予**：实际签发的 scope 取决于 IdP 对 `resource`（或 client）的登记，与客户端请求的 scope 未必相同（按 resource 授予的 IdP 会直接覆盖请求值）。Server 仍用 `oidc_required_scopes` 检查实际 token，验签通过不代表拥有业务权限。
 - **token 存储**：`~/.config/chuanshanjia/credentials.toml`，Unix 下 `0600`；不放进 `config.toml`，因为后者是用户手改的配置，凭证应是程序维护的产物（也便于 `logout` 只删一个文件）。
-- **续期**：`search` 发现 `expires_at` 进入 60 秒窗口就先用 `refresh_token` 静默续期并回写文件，失败则提示重新 `login`。若 IdP 不轮换 refresh token，则保留旧值。
+- **续期**：`search` 发现 `expires_at` 进入 60 秒窗口就先用 `refresh_token` 静默续期并回写文件，失败则提示重新 `login`。若 IdP 不轮换 refresh token，则保留旧值。`expires_at` 优先取 token 响应的 `expires_in`；部分 IdP 在授权码兑换时不返回该字段，此时回退到 access token 的 JWT `exp`，否则 `expires_at` 为空会被当成“永不过期”，10 分钟有效期的 token 将在过期后直接 401 而永不续期。
 - **token 选择顺序**：`--token` > 本地会话 > 配置文件 `token`。保留后两者是为了兼容尚未接入 OIDC、手工拿 token 的场景。
 - **`--no-browser`**：只打印授权 URL，供 SSH/无桌面环境与自动化测试使用。
 
@@ -207,7 +217,7 @@ IdP 按 RFC 9068 签发 JWT access token 时（`typ: at+jwt`），`aud` 取自 R
 ### 5.3 `scope` 校验与资源元数据
 
 - **`server.oidc_required_scopes`**：`aud` 只回答「这张 token 是不是给我」，回答不了「允许做什么」。配置后要求 token 的 `scope` 覆盖全部所需项（兼容 RFC 9068 的空格分隔字符串与部分 IdP 的数组编码）。留空则跳过。业务 scope 的可用值和授予规则由实际 IdP 配置决定，discovery 的 `scopes_supported` 不一定包含它们，因此应以实际签发的 token 或 IdP 配置为准。
-- **RFC 9728 元数据**：后端发布 `/.well-known/oauth-protected-resource`，声明 `resource`、`authorization_servers` 与 `scopes_supported`，作为 CLI 登录前校验本地配置的依据，而不是由 CLI 内置一个可能不适用的默认资源标识。这里复用 `oidc_audiences[0]` 作为资源标识，避免 Server 再引入一个必须保持同步的配置项。
+- **RFC 9728 元数据**：后端发布 `/.well-known/oauth-protected-resource`，声明 `resource`、`authorization_servers` 与 `scopes_supported`，作为 CLI 登录前校验本地配置的依据（目前只用前两项），而不是由 CLI 内置一个可能不适用的默认资源标识。这里复用 `oidc_audiences[0]` 作为资源标识，避免 Server 再引入一个必须保持同步的配置项。
 
 ### 5.4 登出即吊销
 
@@ -217,8 +227,8 @@ IdP 按 RFC 9068 签发 JWT access token 时（`typ: at+jwt`），`aud` 取自 R
 
 ## 6. 测试策略
 
-- **单元测试在各模块内**（`#[cfg(test)]`）：时间解析与默认值、配置校验（含 `server.example.toml` 必须可解析的回归测试）、OIDC 发现（issuer 不一致、非 http URL）与 JWT 全部分支（算法、kid、exp/nbf/iss、未知 kid 刷新、刷新限频、缓存滑动过期与命中后过期改判）、对象路径解析、JSON 清洗管线、预置条件合并、ES 查询翻译、SLS 查询构造/转义/分页/错误映射。
-- **HTTP 层测试**用 axum `oneshot`：路由、认证中间件、错误响应形状。
+- **单元测试在各模块内**（`#[cfg(test)]`）：时间解析与默认值、配置校验（含 `server.example.toml` 必须可解析的回归测试）、OIDC 发现（issuer 不一致、非 http URL）与 JWT 全部分支（算法、kid、exp/nbf/iss、未知 kid 刷新、刷新限频、缓存滑动过期与命中后过期改判）、对象路径解析、JSON 清洗管线、预置条件合并、ES 查询翻译、SLS 查询构造/转义/分页/错误映射、TLS 查询构造/转义、签名参考向量（含 STS）与 Host/路径推导。
+- **HTTP 层测试**用 axum `oneshot`：路由、认证中间件、错误响应形状；ES 与 TLS provider 在此层用 mockito 模拟上游（含签名头形状、请求体、Context 分页与错误映射）。
 - **端到端测试** `tests/cli.rs`：assert_cmd 驱动真实 CLI 二进制，mockito 模拟 ES、Server 与 IdP，覆盖 CLI → Server → ES 全链路（含预置条件不可被 CLI 覆盖），以及登录全流程（从 CLI stdout 取授权 URL、取出 `state` 后向 loopback 回调、校 PKCE 参数、换 token、写 `0600` 凭证文件）、伪造 `state` 被拒、过期会话静默续期。
 - 原则：不读真实用户配置、不请求真实云服务、无 sleep 依赖竞态（缓存测试用注入的超时与时间）。
 - CI（`.github/workflows/ci.yml`）在 macOS/Ubuntu/Windows 三平台跑 `fmt-check → test → lint → build`，clippy 以 `-D warnings` 要求零告警。
@@ -227,9 +237,8 @@ IdP 按 RFC 9068 签发 JWT access token 时（`typ: at+jwt`），`aud` 取自 R
 
 | 项 | 现状 | 方向 |
 | --- | --- | --- |
-| 火山云 TLS | 未实现，`provider = "volces-tls"` 会被拒绝 | 按现有 provider 模式新增 `provider/tls.rs` |
 | `lookups` | 仅配置概念，无运行时行为 | 用于声明 trace 关联查询要访问的其他 service |
-| API 分页/排序/聚合 | 未提供；SLS 单次最多 1000 条 | 视 Agent 实际使用痛点再决定是否引入 |
+| API 分页/排序/聚合 | 未提供；SLS 与 TLS 单次最多 1000 条，TLS 固定按时间逆序 | 视 Agent 实际使用痛点再决定是否引入 |
 | 完整 ES DSL | 不支持 `bool`/`must` 等 | 维持最小查询模型，避免语义泄漏 |
 | CLI 登录 | 授权码 + PKCE（loopback 回调） | 若 IdP 支持 device code 可补；token 可选存入系统钥匙串 |
 | `ignores` | 不支持删除数组元素 | 如有需求按 JSON Path 下标扩展 |
