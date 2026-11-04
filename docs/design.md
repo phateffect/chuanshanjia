@@ -4,7 +4,7 @@
 
 ## 1. 背景与目标
 
-微服务环境下的日志分散在多个 Elasticsearch、阿里云 SLS 等系统中，检索语法、认证方式和字段结构各不相同。目标是为 Agent（以及人）提供一条**可组合、稳定、少惊扰**的日志查询链路：
+微服务环境下的日志分散在多个 Elasticsearch、阿里云 SLS、火山云 TLS 等系统中，检索语法、认证方式和字段结构各不相同。目标是为 Agent（以及人）提供一条**可组合、稳定、少惊扰**的日志查询链路：
 
 - Agent 只需面对一个极简 CLI（`chuanshanjia search <service> -f k=v -k kw`）和一个统一 JSON 响应。
 - 运维侧通过 Server 配置固化 service 路由、预置过滤条件和字段清洗规则，Agent 无需了解底层是 ES 还是 SLS。
@@ -30,7 +30,8 @@
                                               │   ├─ ignores 删除                  │
                                               │   └─ SearchProvider trait           │
                                               │       ├─ EsProvider ─▶ Elasticsearch
-                                              │       └─ SlsProvider ─▶ 阿里云 SLS
+                                              │       ├─ SlsProvider ─▶ 阿里云 SLS
+                                              │       └─ TlsProvider ─▶ 火山云 TLS
                                               └───────────┬──────────────────────────┘
                                                           │ 启动发现 + 未知 kid 刷新
                                                           ▼
@@ -55,6 +56,7 @@ backend 库内部模块：
 | `provider/service.rs` | `ServiceProvider`：service → storage 路由、预置条件合并、`json_fields`/`ignores` 清洗管线、对象路径解析 |
 | `provider/es.rs` | ES 查询翻译与响应归一化 |
 | `provider/sls.rs` | SLS 原生查询构造、分页拉取与响应归一化 |
+| `provider/tls.rs` | 火山云 TLS：火山引擎 V4 签名、SearchLogs 调用、Context 分页与响应归一化 |
 
 ## 3. 关键设计决策
 
@@ -90,7 +92,7 @@ service 可配置 `filters` 和 `keyword`。合并规则：
 
 - `logs` 直接是日志对象数组，去掉 ES `hits.hits._source` 包装（无 `_source` 时退用 hit 本身）。
 - `count` 是本次返回条数，**不是**总匹配数（不做额外 count 查询）。
-- `took`/`complete` 为可选：SLS 的 `took` 是本地计时的所有分页总耗时，ES 直接取上游 `took`；`complete` 在 SLS 表示所有分页 `Complete`，在 ES 表示未 `timed_out`。字段缺失即信息缺失，不造默认值。
+- `took`/`complete` 为可选：SLS 的 `took` 是本地计时的所有分页总耗时，ES 直接取上游 `took`，TLS 汇总各页 `ElapsedMillisecond`；`complete` 在 SLS 表示所有分页 `Complete`，在 ES 表示未 `timed_out`，在 TLS 表示所有分页 `ResultStatus=complete` 且最后一页 `ListOver=true`（触及 1000 条上限或上游只返回部分结果时如实报 `false`）。字段缺失即信息缺失，不造默认值。
 
 ### 3.4 输出清洗管线：parse → ignore
 
@@ -139,9 +141,9 @@ service 可配置 `filters` 和 `keyword`。合并规则：
 
 `ProviderError` 统一输出 `{"error": {"type": ..., "reason": ...}, "status": ...}`：
 
-- **业务错误**（4xx）：`service_not_found`、`invalid_time_range`、`unsupported_sls_filter`，由本层生成。
-- **上游错误**：ES 非 2xx 响应原样保留状态码和 JSON 错误体；SLS `Server` 错误保留 HTTP 状态与 `error_code`，`request_id` 拼进 reason 便于找阿里云排查。
-- **基础设施错误**：网络失败、凭证无效、响应解码失败统一 502（`es_request_failed`/`invalid_es_response`/`sls_request_failed`），reason 去掉 URL（含凭证信息）。
+- **业务错误**（4xx）：`service_not_found`、`invalid_time_range`、`unsupported_sls_filter`、`unsupported_tls_filter`，由本层生成。
+- **上游错误**：ES 非 2xx 响应原样保留状态码和 JSON 错误体；SLS `Server` 错误保留 HTTP 状态与 `error_code`，`request_id` 拼进 reason 便于找阿里云排查；TLS 非 2xx 且错误体含 `ErrorCode`/`ErrorMessage` 时保留状态码与错误码，`X-Tls-Requestid` 拼进 reason，否则原样透传错误体。
+- **基础设施错误**：网络失败、凭证无效、响应解码失败统一 502（`es_request_failed`/`invalid_es_response`/`sls_request_failed`/`tls_request_failed`/`invalid_tls_response`），reason 去掉 URL（含凭证信息）。
 
 401 响应遵循 RFC 6750：缺凭证时无响应体，仅 `WWW-Authenticate: Bearer realm="chuanshanjia"`；token 无效时附 `error="invalid_token"` 与 JSON 错误体。
 
@@ -156,7 +158,7 @@ pub trait SearchProvider: Send + Sync {
 }
 ```
 
-`ServiceProvider` 持有 storage 名 → provider 实例的映射；service 引用 storage，多个 service 可复用同一 storage。测试用 `MockProvider`/`MockSlsClient` 替换真实实现。
+`ServiceProvider` 持有 storage 名 → provider 实例的映射；service 引用 storage，多个 service 可复用同一 storage。测试用 `MockProvider`/`MockSlsClient` 替换真实实现，ES 与 TLS 走 mockito 模拟 HTTP 上游。
 
 ### 4.1 Elasticsearch
 
@@ -171,6 +173,14 @@ pub trait SearchProvider: Send + Sync {
 - 查询构造为原生查询语法：`"keywords" AND "field": value | with_pack_meta`。空查询用 `*`；空字符串 keywords 视为未提供；字符串统一双引号并转义 `\` 与 `"`；数字/布尔保留标量形式；null/数组/对象值直接 400 拒绝（SLS 无对应语义）。字段匹配依赖 SLS 索引配置，分词行为不在本层控制。
 - **分页策略**：每页 `line=100`，`offset += 100` 翻页；页面不满 100 条或累计达到 1000 条（10 页）即停。`complete` 汇总所有页的 `Complete` 状态，向调用方诚实暴露“可能没拉全”。
 - `__pack_meta__` 等元数据随 `with_pack_meta` 返回，再由 `ignores` 清理。
+
+### 4.3 火山云 TLS
+
+- 无官方 Rust SDK，用 reqwest 直连 `POST /SearchLogs`（`x-tls-apiversion: 0.3.0`），按[火山引擎签名机制](https://www.volcengine.com/docs/6470/112168)对每个请求签名：HMAC-SHA256，服务名固定 `TLS`，scope 为 `{date}/{region}/TLS/request`，signed headers 为 `content-type;host;x-content-sha256;x-date[;x-security-token];x-tls-apiversion`，密钥链 HMAC(SK, date)→region→service→`request`。签名实现与官方 Go/Python SDK 逐字对齐，并用独立实现的参考向量单测锁定；凭证在启动时从配置解析（含 STS `security_token`），不进日志。
+- `service.index` 即 Topic ID。`StartTime`/`EndTime` 由 epoch seconds 乘 1000 得到（API 要求毫秒），`Limit=100`、`Sort=desc`（时间逆序，新日志在前）。
+- 查询构造为 [TLS 检索语法](https://www.volcengine.com/docs/6470/1206705)：`"keywords" AND key:value`。空查询用 `*`；空字符串 keywords 视为未提供；字符串统一双引号并转义 `\` 与 `"`（官方文档：引号内仅需转义这两者）；纯 `[A-Za-z0-9_]` 字段名原样传递，含特殊字符的字段名按文档用双引号包裹；数字/布尔保留标量形式；null/数组/对象值 400 拒绝（`unsupported_tls_filter`）。字段匹配依赖 TLS 键值索引配置，分词行为不在本层控制。
+- **分页策略**：Context 游标翻页——上一页 `ListOver=false` 且页满 100 条且未达 1000 条上限时，携带上一页 `Context` 续查；`complete` 要求所有页 `ResultStatus=complete` 且最后一页 `ListOver=true`，`took` 汇总各页 `ElapsedMillisecond`。
+- 错误映射见 3.7；`__path__`、`__source__` 等元数据字段由 `ignores` 清理。
 
 ## 5. CLI 设计
 
@@ -217,8 +227,8 @@ IdP 按 RFC 9068 签发 JWT access token 时（`typ: at+jwt`），`aud` 取自 R
 
 ## 6. 测试策略
 
-- **单元测试在各模块内**（`#[cfg(test)]`）：时间解析与默认值、配置校验（含 `server.example.toml` 必须可解析的回归测试）、OIDC 发现（issuer 不一致、非 http URL）与 JWT 全部分支（算法、kid、exp/nbf/iss、未知 kid 刷新、刷新限频、缓存滑动过期与命中后过期改判）、对象路径解析、JSON 清洗管线、预置条件合并、ES 查询翻译、SLS 查询构造/转义/分页/错误映射。
-- **HTTP 层测试**用 axum `oneshot`：路由、认证中间件、错误响应形状。
+- **单元测试在各模块内**（`#[cfg(test)]`）：时间解析与默认值、配置校验（含 `server.example.toml` 必须可解析的回归测试）、OIDC 发现（issuer 不一致、非 http URL）与 JWT 全部分支（算法、kid、exp/nbf/iss、未知 kid 刷新、刷新限频、缓存滑动过期与命中后过期改判）、对象路径解析、JSON 清洗管线、预置条件合并、ES 查询翻译、SLS 查询构造/转义/分页/错误映射、TLS 查询构造/转义、签名参考向量（含 STS）与 Host/路径推导。
+- **HTTP 层测试**用 axum `oneshot`：路由、认证中间件、错误响应形状；ES 与 TLS provider 在此层用 mockito 模拟上游（含签名头形状、请求体、Context 分页与错误映射）。
 - **端到端测试** `tests/cli.rs`：assert_cmd 驱动真实 CLI 二进制，mockito 模拟 ES、Server 与 IdP，覆盖 CLI → Server → ES 全链路（含预置条件不可被 CLI 覆盖），以及登录全流程（从 CLI stdout 取授权 URL、取出 `state` 后向 loopback 回调、校 PKCE 参数、换 token、写 `0600` 凭证文件）、伪造 `state` 被拒、过期会话静默续期。
 - 原则：不读真实用户配置、不请求真实云服务、无 sleep 依赖竞态（缓存测试用注入的超时与时间）。
 - CI（`.github/workflows/ci.yml`）在 macOS/Ubuntu/Windows 三平台跑 `fmt-check → test → lint → build`，clippy 以 `-D warnings` 要求零告警。
@@ -227,9 +237,8 @@ IdP 按 RFC 9068 签发 JWT access token 时（`typ: at+jwt`），`aud` 取自 R
 
 | 项 | 现状 | 方向 |
 | --- | --- | --- |
-| 火山云 TLS | 未实现，`provider = "volces-tls"` 会被拒绝 | 按现有 provider 模式新增 `provider/tls.rs` |
 | `lookups` | 仅配置概念，无运行时行为 | 用于声明 trace 关联查询要访问的其他 service |
-| API 分页/排序/聚合 | 未提供；SLS 单次最多 1000 条 | 视 Agent 实际使用痛点再决定是否引入 |
+| API 分页/排序/聚合 | 未提供；SLS 与 TLS 单次最多 1000 条，TLS 固定按时间逆序 | 视 Agent 实际使用痛点再决定是否引入 |
 | 完整 ES DSL | 不支持 `bool`/`must` 等 | 维持最小查询模型，避免语义泄漏 |
 | CLI 登录 | 授权码 + PKCE（loopback 回调） | 若 IdP 支持 device code 可补；token 可选存入系统钥匙串 |
 | `ignores` | 不支持删除数组元素 | 如有需求按 JSON Path 下标扩展 |

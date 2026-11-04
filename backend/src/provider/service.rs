@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::{
     config::{AppConfig, ServiceConfig, StorageConfig},
-    provider::{ProviderError, SearchProvider, es::EsProvider, sls::SlsProvider},
+    provider::{ProviderError, SearchProvider, es::EsProvider, sls::SlsProvider, tls::TlsProvider},
     search::{SearchQuery, SearchRequest},
 };
 
@@ -137,6 +137,52 @@ fn build_storage(name: &str, storage: StorageConfig) -> Result<Arc<dyn SearchPro
             let client = Client::from_config(config)
                 .with_context(|| format!("failed to create SLS client for storage {name:?}"))?;
             Ok(Arc::new(SlsProvider::new(client, project)))
+        }
+        StorageConfig::VolcesTls {
+            region,
+            endpoint,
+            access_key_id,
+            access_key_secret,
+            security_token,
+        } => {
+            ensure!(
+                !region.is_empty(),
+                "storage {name:?} region must not be empty"
+            );
+            let endpoint = match endpoint {
+                Some(endpoint) => Url::parse(&endpoint)
+                    .with_context(|| format!("storage {name:?} endpoint must be a valid URL"))?,
+                None => Url::parse(&format!("https://tls-{region}.volces.com")).with_context(|| {
+                    format!(
+                        "storage {name:?} region {region:?} does not yield a valid TLS endpoint URL"
+                    )
+                })?,
+            };
+            ensure!(
+                matches!(endpoint.scheme(), "http" | "https"),
+                "storage {name:?} endpoint must use http or https"
+            );
+            let access_key_id = access_key_id
+                .resolve(&format!("storage {name}.access_key_id"))?
+                .into_owned();
+            let access_key_secret = access_key_secret
+                .resolve(&format!("storage {name}.access_key_secret"))?
+                .into_owned();
+            let security_token = match security_token {
+                Some(token) => Some(
+                    token
+                        .resolve(&format!("storage {name}.security_token"))?
+                        .into_owned(),
+                ),
+                None => None,
+            };
+            Ok(Arc::new(TlsProvider::new(
+                endpoint,
+                region,
+                access_key_id,
+                access_key_secret,
+                security_token,
+            )))
         }
     }
 }

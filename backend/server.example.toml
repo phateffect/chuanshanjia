@@ -33,19 +33,24 @@ base_url = "http://127.0.0.1:9200"
 # 使用 STS 时再配置 security_token；凭证同样支持字符串或环境变量。
 # security_token = { env = "SLS_SECURITY_TOKEN" }
 
-# 火山云 TLS 预留配置，当前尚不支持，不能启用。
+# 火山云 TLS 示例。使用时取消整段注释，并把 service 的 storage 改为 "bjv"；
+# service 的 index 填 TLS 日志主题 ID（Topic ID）。
+# 服务地址默认按公网 https://tls-{region}.volces.com 生成；内网可显式指定
+# https://tls-{region}.ivolces.com。
 # [storages.bjv]
 # provider = "volces-tls"
 # region = "cn-beijing"
-# topic_id = "your-topic-id"
-# access_key_id = { env = "TLS_BJV_ACCESS_KEY_ID" }
+# endpoint = "https://tls-cn-beijing.ivolces.com"
+# access_key_id = { env = "TLS_BJV_ACCESS_KEY_ID" } # 也可直接写 "your-access-key-id"
 # access_key_secret = { env = "TLS_BJV_ACCESS_KEY_SECRET" }
+# 使用 STS 时再配置 security_token；凭证同样支持字符串或环境变量。
+# security_token = { env = "TLS_BJV_SECURITY_TOKEN" }
 
 # Service 是搜索入口，例如 POST /foo/_search。
 [services.foo]
 # 必填：引用某个 storage 的名称。
 storage = "es"
-# 必填：实际 ES 索引或 SLS Logstore。
+# 必填：实际 ES 索引、SLS Logstore 或 TLS 日志主题 ID（Topic ID）。
 index = "app-logs"
 
 # 可选：预置全文查询关键词；配置后优先于请求中的 keywords。
