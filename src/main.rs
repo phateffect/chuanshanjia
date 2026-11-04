@@ -25,10 +25,7 @@ pub(crate) fn emit(line: impl std::fmt::Display) {
 // RFC 8252: the IdP ignores the port of a loopback redirect URI, so ask the OS
 // for a free one instead of squatting on a fixed port.
 const DEFAULT_REDIRECT_URI: &str = "http://127.0.0.1:0/callback";
-// RFC 8707 resource indicator: the audience the token is minted for. It must
-// also appear in the backend's `oidc_audiences` and in the IdP's allowlist.
-const DEFAULT_RESOURCE: &str = "https://logs.example.com";
-const DEFAULT_CONFIG: &str = "base_url = \"\"\n# token = \"\"\n# issuer = \"https://oidc.example.com\"\n# client_id = \"chuanshanjia\"\n# resource = \"https://logs.example.com\"\n# scope = \"openid profile email offline_access logs:read\"\n";
+const DEFAULT_CONFIG: &str = "base_url = \"\"\n# token = \"\"\n# issuer = \"https://oidc.example.com\"\n# client_id = \"chuanshanjia\"\nresource = \"\"\n# scope = \"openid profile email offline_access logs:read\"\n";
 
 /// Search logs through a chuanshanjia backend.
 #[derive(Cli)]
@@ -75,7 +72,7 @@ struct LoginArgs {
     #[usage(long)]
     scope: Option<String>,
 
-    /// Resource the token is for (RFC 8707); defaults to `resource` in the config.
+    /// Resource the token is for (RFC 8707); required unless set in the config.
     #[usage(long)]
     resource: Option<String>,
 
@@ -199,6 +196,14 @@ struct Config {
     scope: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ResourceMetadata {
+    resource: String,
+    authorization_servers: Vec<String>,
+    #[serde(default)]
+    scopes_supported: Vec<String>,
+}
+
 fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     if let Some(profile) = std::env::var_os("USERPROFILE").filter(|profile| !profile.is_empty()) {
@@ -295,8 +300,80 @@ fn load_stored_token() -> Result<Option<String>> {
     Ok(Some(oidc::bearer_token(&credentials)?.to_owned()))
 }
 
+fn validate_login_metadata(
+    metadata: &ResourceMetadata,
+    issuer: &str,
+    scope: &str,
+    resource: &str,
+) -> Result<()> {
+    ensure!(
+        metadata.resource == resource,
+        "resource {resource:?} does not match backend resource {:?}",
+        metadata.resource
+    );
+    let issuer = issuer.trim_end_matches('/');
+    ensure!(
+        metadata
+            .authorization_servers
+            .iter()
+            .any(|candidate| candidate.trim_end_matches('/') == issuer),
+        "issuer {issuer:?} is not listed in backend authorization_servers {:?}",
+        metadata.authorization_servers
+    );
+    let requested_scopes = scope.split_whitespace().collect::<Vec<_>>();
+    let missing_scopes = metadata
+        .scopes_supported
+        .iter()
+        .map(String::as_str)
+        .filter(|required| !requested_scopes.contains(required))
+        .collect::<Vec<_>>();
+    ensure!(
+        missing_scopes.is_empty(),
+        "scope does not include backend-required scope(s): {}",
+        missing_scopes.join(" ")
+    );
+    Ok(())
+}
+
+fn check_login_config(
+    base_url: &str,
+    issuer: &str,
+    client_id: &str,
+    scope: &str,
+    resource: &str,
+) -> Result<()> {
+    ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
+    let issuer_url = reqwest::Url::parse(issuer).context("invalid issuer")?;
+    ensure!(
+        matches!(issuer_url.scheme(), "http" | "https"),
+        "issuer must use http or https"
+    );
+    ensure!(!resource.trim().is_empty(), "resource must not be empty");
+    let resource_url = reqwest::Url::parse(resource).context("invalid resource")?;
+    ensure!(
+        resource_url.fragment().is_none(),
+        "resource must not contain a fragment"
+    );
+
+    let url = backend_url(base_url, &[".well-known", "oauth-protected-resource"])
+        .context("invalid base_url")?;
+    let response = oidc::client()?
+        .get(url.clone())
+        .send()
+        .with_context(|| format!("failed to GET backend resource metadata {url}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .context("failed to read backend resource metadata")?;
+    ensure!(status.is_success(), "GET {url} returned {status}: {body}");
+    let metadata: ResourceMetadata = serde_json::from_str(&body)
+        .with_context(|| format!("invalid resource metadata at {url}"))?;
+    validate_login_metadata(&metadata, issuer, scope, resource)
+}
+
 fn login(args: LoginArgs) -> Result<()> {
-    let config = read_config(&config_path()?)?;
+    let path = config_path()?;
+    let config = read_config(&path)?;
     let issuer = args
         .issuer
         .or(config.issuer)
@@ -318,7 +395,9 @@ fn login(args: LoginArgs) -> Result<()> {
     let resource = args
         .resource
         .or(config.resource.clone())
-        .unwrap_or_else(|| DEFAULT_RESOURCE.to_owned());
+        .context("set `resource` in the config file or pass --resource")?;
+    check_login_config(&config.base_url, &issuer, &client_id, &scope, &resource)
+        .with_context(|| format!("login configuration check failed for {}", path.display()))?;
     let credentials = oidc::login(
         &issuer,
         &client_id,
@@ -361,18 +440,25 @@ fn logout(args: LogoutArgs) -> Result<()> {
     Ok(())
 }
 
-fn search_url(base_url: &str, service: &str) -> Result<reqwest::Url> {
+fn backend_url(base_url: &str, path: &[&str]) -> Result<reqwest::Url> {
     let mut url = reqwest::Url::parse(base_url)?;
     ensure!(
         matches!(url.scheme(), "http" | "https"),
         "base_url must use http or https"
     );
-    url.path_segments_mut()
-        .map_err(|_| anyhow::anyhow!("base_url cannot be used as a base URL"))?
-        .pop_if_empty()
-        .push(service)
-        .push("_search");
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("base_url cannot be used as a base URL"))?;
+    segments.pop_if_empty();
+    for segment in path {
+        segments.push(segment);
+    }
+    drop(segments);
     Ok(url)
+}
+
+fn search_url(base_url: &str, service: &str) -> Result<reqwest::Url> {
+    backend_url(base_url, &[service, "_search"])
 }
 
 fn search(args: SearchArgs) -> Result<()> {
@@ -495,5 +581,55 @@ mod tests {
         assert!((before..=after).contains(&args.end.0));
         assert_eq!(args.service, "foo");
         assert_eq!(args.keywords.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn login_metadata_must_match_resource_issuer_and_required_scopes() {
+        let mut metadata = ResourceMetadata {
+            resource: "https://logs.example.com".to_owned(),
+            authorization_servers: vec!["https://idp.example.com".to_owned()],
+            scopes_supported: vec!["logs:read".to_owned()],
+        };
+        validate_login_metadata(
+            &metadata,
+            "https://idp.example.com/",
+            "openid logs:read",
+            "https://logs.example.com",
+        )
+        .unwrap();
+
+        let error = validate_login_metadata(
+            &metadata,
+            "https://idp.example.com",
+            "openid logs:read",
+            "https://other.example.com",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match backend resource")
+        );
+
+        metadata.authorization_servers = vec!["https://other.example.com".to_owned()];
+        let error = validate_login_metadata(
+            &metadata,
+            "https://idp.example.com",
+            "openid logs:read",
+            "https://logs.example.com",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("authorization_servers"));
+
+        metadata.authorization_servers = vec!["https://idp.example.com".to_owned()];
+        metadata.scopes_supported = vec!["logs:read".to_owned(), "logs:export".to_owned()];
+        let error = validate_login_metadata(
+            &metadata,
+            "https://idp.example.com",
+            "openid logs:read",
+            "https://logs.example.com",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("logs:export"));
     }
 }

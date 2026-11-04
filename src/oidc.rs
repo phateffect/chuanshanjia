@@ -123,7 +123,7 @@ fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     fs::write(path, contents)
 }
 
-fn client() -> Result<reqwest::blocking::Client> {
+pub(crate) fn client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()

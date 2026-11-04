@@ -141,7 +141,7 @@ fn config_creates_default_and_opens_editor() {
         .expect("default config should exist");
     assert_eq!(
         contents,
-        "base_url = \"\"\n# token = \"\"\n# issuer = \"https://oidc.example.com\"\n# client_id = \"chuanshanjia\"\n# resource = \"https://logs.example.com\"\n# scope = \"openid profile email offline_access logs:read\"\n"
+        "base_url = \"\"\n# token = \"\"\n# issuer = \"https://oidc.example.com\"\n# client_id = \"chuanshanjia\"\nresource = \"\"\n# scope = \"openid profile email offline_access logs:read\"\n"
     );
 }
 
@@ -632,6 +632,7 @@ fn query_parameters(url: &reqwest::Url) -> std::collections::HashMap<String, Str
 
 #[test]
 fn login_runs_pkce_flow_and_stores_tokens() {
+    let resource = "https://logs.example.com";
     let mut idp = Server::new();
     let discovery = idp
         .mock("GET", "/.well-known/openid-configuration")
@@ -650,6 +651,7 @@ fn login_runs_pkce_flow_and_stores_tokens() {
             Matcher::UrlEncoded("grant_type".into(), "authorization_code".into()),
             Matcher::UrlEncoded("code".into(), "the-code".into()),
             Matcher::UrlEncoded("client_id".into(), "cli".into()),
+            Matcher::UrlEncoded("resource".into(), resource.into()),
         ]))
         .with_body(
             json!({
@@ -660,12 +662,26 @@ fn login_runs_pkce_flow_and_stores_tokens() {
             .to_string(),
         )
         .create();
+    let mut backend = Server::new();
+    let metadata = backend
+        .mock("GET", "/.well-known/oauth-protected-resource")
+        .with_body(
+            json!({
+                "resource": resource,
+                "authorization_servers": [idp.url()],
+                "scopes_supported": [],
+                "bearer_methods_supported": ["header"],
+            })
+            .to_string(),
+        )
+        .create();
 
     let home = TempDir::new().expect("temporary home should be created");
     write_config(
         &home,
         &format!(
-            "base_url = \"http://127.0.0.1:1\"\nissuer = \"{}\"\nclient_id = \"cli\"\n",
+            "base_url = \"{}\"\nissuer = \"{}\"\nclient_id = \"cli\"\nresource = \"{resource}\"\n",
+            backend.url(),
             idp.url()
         ),
     );
@@ -687,7 +703,7 @@ fn login_runs_pkce_flow_and_stores_tokens() {
     assert_eq!(parameters["code_challenge_method"], "S256");
     assert!(!parameters["code_challenge"].is_empty());
     assert_eq!(parameters["scope"], "openid offline_access");
-    assert_eq!(parameters["resource"], "https://logs.example.com");
+    assert_eq!(parameters["resource"], resource);
     let state = parameters["state"].clone();
     assert!(!state.is_empty());
     let redirect = reqwest::Url::parse(&parameters["redirect_uri"]).unwrap();
@@ -702,6 +718,7 @@ fn login_runs_pkce_flow_and_stores_tokens() {
     let status = child.wait().expect("login should finish");
     assert!(status.success(), "login failed with {status}");
 
+    metadata.assert();
     discovery.assert();
     token.assert();
     let credentials = fs::read_to_string(home.path().join(".config/chuanshanjia/credentials.toml"))
@@ -719,6 +736,7 @@ fn login_runs_pkce_flow_and_stores_tokens() {
 
 #[test]
 fn login_rejects_a_mismatched_state() {
+    let resource = "https://logs.example.com";
     let mut idp = Server::new();
     idp.mock("GET", "/.well-known/openid-configuration")
         .with_body(
@@ -730,12 +748,25 @@ fn login_rejects_a_mismatched_state() {
             .to_string(),
         )
         .create();
+    let mut backend = Server::new();
+    backend
+        .mock("GET", "/.well-known/oauth-protected-resource")
+        .with_body(
+            json!({
+                "resource": resource,
+                "authorization_servers": [idp.url()],
+                "scopes_supported": ["logs:read"],
+            })
+            .to_string(),
+        )
+        .create();
 
     let home = TempDir::new().expect("temporary home should be created");
     write_config(
         &home,
         &format!(
-            "base_url = \"http://127.0.0.1:1\"\nissuer = \"{}\"\nclient_id = \"cli\"\n",
+            "base_url = \"{}\"\nissuer = \"{}\"\nclient_id = \"cli\"\nresource = \"{resource}\"\n",
+            backend.url(),
             idp.url()
         ),
     );
@@ -927,4 +958,52 @@ fn login_requires_config_or_flags() {
     let assert = chuanshanjia(&home).arg("login").assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(stderr.contains("issuer"), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn login_requires_an_explicit_resource() {
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(
+        &home,
+        "base_url = \"http://127.0.0.1:1\"\nissuer = \"https://idp.example.com\"\nclient_id = \"cli\"\n",
+    );
+
+    let assert = chuanshanjia(&home).arg("login").assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("set `resource` in the config file or pass --resource"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn login_rejects_a_resource_mismatch_before_oidc_discovery() {
+    let mut backend = Server::new();
+    let metadata = backend
+        .mock("GET", "/.well-known/oauth-protected-resource")
+        .with_body(
+            json!({
+                "resource": "https://logs.example.com",
+                "authorization_servers": ["https://idp.example.com"],
+                "scopes_supported": ["logs:read"],
+            })
+            .to_string(),
+        )
+        .create();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(
+        &home,
+        &format!(
+            "base_url = \"{}\"\nissuer = \"https://idp.example.com\"\nclient_id = \"cli\"\nresource = \"https://wrong.example.com\"\n",
+            backend.url()
+        ),
+    );
+
+    let assert = chuanshanjia(&home).arg("login").assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("does not match backend resource"),
+        "unexpected stderr: {stderr}"
+    );
+    metadata.assert();
 }

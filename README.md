@@ -120,7 +120,7 @@ chuanshanjia search foo \
 
 ```text
 chuanshanjia search <SERVICE> [-f KEY=VALUE]... [-k KEYWORDS] [--token JWT] [--start TIME] [--end TIME]
-chuanshanjia login [--issuer URL] [--client-id ID] [--port PORT] [--scope SCOPES] [--no-browser]
+chuanshanjia login [--issuer URL] [--client-id ID] [--redirect-uri URI] [--resource URI] [--scope SCOPES] [--no-browser]
 chuanshanjia logout
 chuanshanjia config
 ```
@@ -153,18 +153,20 @@ chuanshanjia login                 # 打开浏览器完成登录
 chuanshanjia logout                # 吊销会话并删除本地 token（--local 只删本地）
 ```
 
-登录使用**授权码 + PKCE**、公开客户端（无 client_secret），回调走 `http://127.0.0.1:<port>/callback`。`issuer` 与 `client_id` 可写在 CLI 配置里，也可用参数覆盖：
+登录使用**授权码 + PKCE**、公开客户端（无 client_secret），回调走 `http://127.0.0.1:<port>/callback`。`issuer`、`client_id` 与 `resource` 可写在 CLI 配置里，也可用参数覆盖：
 
 ```toml
 # ~/.config/chuanshanjia/config.toml
 base_url = "http://127.0.0.1:3000"
 issuer = "https://oidc.example.com"
 client_id = "chuanshanjia"
+resource = "https://logs.example.com"
 ```
 
 ```sh
 chuanshanjia login --issuer https://oidc.example.com \
-  --client-id chuanshanjia
+  --client-id chuanshanjia \
+  --resource https://logs.example.com
 chuanshanjia login --no-browser      # 只打印授权 URL，不自动开浏览器
 ```
 
@@ -173,7 +175,8 @@ chuanshanjia login --no-browser      # 只打印授权 URL，不自动开浏览�
 - 默认申请 `openid profile email offline_access logs:read`，并在带 `offline_access` 时附加 `prompt=consent`——否则很多 IdP 不会下发 `refresh_token`。
 - **业务 scope 必须显式申请并获得 IdP 授权**：漏申请或 client 未获授权时，token 可能通过验签但无法通过 Server 的 scope 校验。用配置项 `scope` 或 `--scope` 覆盖整串 scope。
 - token 存在 `~/.config/chuanshanjia/credentials.toml`，权限 `0600`。
-- **resource（RFC 8707）**：登录时会把 `resource` 传给授权端点与 token 端点，IdP 据此把 access token 的 `aud` 设成该值。默认 `https://logs.example.com`，可写在配置 `resource` 或用 `--resource` 覆盖；**必须与 `server.oidc_audiences` 和 IdP 上的资源登记完全一致**。
+- **resource（RFC 8707）没有内置默认值**：必须在配置中设置 `resource` 或传入 `--resource`。登录时会把 `resource` 传给授权端点与 token 端点，IdP 据此把 access token 的 `aud` 设成该值；**必须与 `server.oidc_audiences` 和 IdP 上的资源登记完全一致**。
+- **登录前检查配置**：CLI 先请求 `base_url` 下的 `/.well-known/oauth-protected-resource`，检查 `resource` 是否匹配、`issuer` 是否属于 `authorization_servers`，以及申请的 `scope` 是否覆盖 `scopes_supported`。检查失败或 Server 元数据不可用时不会进入 OIDC 授权流程。
 - **access_token 必须是 JWT**：OIDC 本地登录会话只使用 JWT 形态的 `access_token`；不透明或格式不符时报错。
 - `search` 的 token 优先级：`--token` > 本地登录会话 > 配置文件的 `token`；会话过期时先用 `refresh_token` 静默续期并回写文件，续不了则提示重新 `login`。
 
