@@ -1,244 +1,162 @@
 # chuanshanjia 设计文档
 
-本文描述 chuanshanjia 的架构、关键设计决策及其动机。使用方法与配置参考见 [README](../README.md)。
+本文描述当前纯 CLI 仓库的架构、关键设计决策及其动机。使用方法见 [README](../README.md)；外部 HTTP 服务的完整行为契约及 Python 重实现说明见 [backend-migration](backend-migration.md)。
 
 ## 1. 背景与目标
 
-微服务环境下的日志分散在多个 Elasticsearch、阿里云 SLS、火山云 TLS 等系统中，检索语法、认证方式和字段结构各不相同。目标是为 Agent（以及人）提供一条**可组合、稳定、少惊扰**的日志查询链路：
+微服务日志分散在不同存储中。当前项目只承担其中一层：为 Agent 和人提供稳定、可组合、少惊扰的命令行入口。
 
-- Agent 只需面对一个极简 CLI（`chuanshanjia search <service> -f k=v -k kw`）和一个统一 JSON 响应。
-- 运维侧通过 Server 配置固化 service 路由、预置过滤条件和字段清洗规则，Agent 无需了解底层是 ES 还是 SLS。
-- 输出适合直接被 Agent 消费：结构统一、噪音字段可删、内嵌 JSON 字符串可展开。
+- 用统一的 `chuanshanjia search <service> -f k=v -k kw` 表达查询；
+- 将参数、时间和 token 归一化后调用外部 HTTP 服务；
+- 将服务端 JSON 原样作为 CLI 的结构化结果输出；
+- 用标准 OIDC 流程降低手工分发和刷新 token 的成本。
 
 ### 非目标
 
-- 不做完整 ES DSL 或 SLS 分析语法的透传；只支持 filter + keywords + 时间范围这一最小查询模型。
-- 不做日志采集、存储、告警。
-- 不做多租户管理界面；认证只做 JWT 验证，不做签发。
+- 本仓库不实现 HTTP 服务端、storage provider、查询翻译或日志清洗；
+- 不直接连接 Elasticsearch、SLS、TLS，不保存云服务凭证；
+- 不做完整 ES DSL、日志采集、存储、告警或管理界面；
+- CLI 不签发 token，也不代替服务端做权限判定。
 
 ## 2. 总体架构
 
-```
-┌──────────────┐   POST /{service}/_search    ┌──────────────────────────────────────┐
-│ chuanshanjia │ ───────────────────────────▶ │ chuanshanjia-server (axum)            │
-│ (CLI)        │   Authorization: Bearer JWT  │                                      │
-└──────────────┘                              │  require_jwt ─▶ search handler       │
-      ▲                                       │       │                              │
- ~/.config/chuanshanjia/config.toml            │  ServiceProvider                   │
-                                              │   ├─ 预置 filters/keyword 合并       │
-                                              │   ├─ json_fields 解析              │
-                                              │   ├─ ignores 删除                  │
-                                              │   └─ SearchProvider trait           │
-                                              │       ├─ EsProvider ─▶ Elasticsearch
-                                              │       ├─ SlsProvider ─▶ 阿里云 SLS
-                                              │       └─ TlsProvider ─▶ 火山云 TLS
-                                              └───────────┬──────────────────────────┘
-                                                          │ 启动发现 + 未知 kid 刷新
-                                                          ▼
-                                                 自建 OIDC (JWKS)
+```text
+┌──────────────┐   POST /{service}/_search    ┌────────────────────┐
+│ chuanshanjia │ ───────────────────────────▶ │ 外部 HTTP 查询服务 │
+│ CLI          │   Authorization: Bearer JWT  │ （其他项目实现）   │
+└──────────────┘                              └────────────────────┘
+       │  ▲
+       │  └──────── GET /.well-known/oauth-protected-resource
+       ▼
+~/.config/chuanshanjia/
+  config.toml
+  credentials.toml
+       │
+       └──────── OIDC authorization code + PKCE ──▶ IdP
 ```
 
-两个 crate 组成 workspace：
+仓库是单一 Rust package，只产生 `chuanshanjia` 二进制：
 
-| 产物 | crate | 职责 |
-| --- | --- | --- |
-| `chuanshanjia` | 根 crate（`src/main.rs`） | CLI：参数解析（usage-rs）、时间归一化、调用 Server、打印 JSON |
-| `chuanshanjia-server` | `backend`（`src/main.rs` + lib） | HTTP 后端：配置加载、JWT 认证、service 路由、查询转换与清洗 |
-
-backend 库内部模块：
-
-| 模块 | 职责 |
+| 文件 | 职责 |
 | --- | --- |
-| `config.rs` | `AppConfig`（server/storages/services）的反序列化与校验；凭证的字符串/环境变量双形态 |
-| `auth.rs` | OIDC 发现与 JWKS 拉取、Ed25519 JWT 验证、验证结果缓存、RFC 6750 401 响应 |
-| `search.rs` | `POST /{service}/_search` handler；`SearchRequest`/`SearchQuery` 数据模型与时间范围校验 |
-| `provider/mod.rs` | `SearchProvider` trait、`ProviderError`（统一 JSON 错误）、`UnconfiguredProvider` |
-| `provider/service.rs` | `ServiceProvider`：service → storage 路由、预置条件合并、`json_fields`/`ignores` 清洗管线、对象路径解析 |
-| `provider/es.rs` | ES 查询翻译与响应归一化 |
-| `provider/sls.rs` | SLS 原生查询构造、分页拉取与响应归一化 |
-| `provider/tls.rs` | 火山云 TLS：火山引擎 V4 签名、SearchLogs 调用、Context 分页与响应归一化 |
+| `src/main.rs` | usage-rs 参数、配置、时间归一化、HTTP 调用、输出及子命令编排 |
+| `src/oidc.rs` | OIDC discovery、授权码 + PKCE、loopback 回调、token 存储/刷新/吊销 |
+| `tests/cli.rs` | 真实 CLI 二进制的端到端测试，外部服务与 IdP 均使用 mock |
 
-## 3. 关键设计决策
+服务端职责已经迁出。为避免重写时丢失语义，迁移前的配置、认证、provider、响应和错误行为独立记录在 `docs/backend-migration.md`，不再混入当前 CLI 架构。
 
-### 3.1 查询模型：filter + keywords + 时间范围
+## 3. 查询设计
 
-请求体刻意保持最小：
+### 3.1 CLI 查询模型
 
-```json
-{"query": {"filter": {"k": "v"}, "keywords": "text"}, "start": 0, "end": 0}
-```
+CLI 保留最小查询模型：service、可重复的等值 filter、单个 keywords 和时间范围。
 
-- **filter** 是字段等值筛选，值保留 JSON 标量类型（字符串/数字/布尔）；匹配语义交给底层 provider 与索引。
-- **keywords** 是全文搜索，一个字符串，不做词条拆分。
-- 时间统一为 epoch seconds，区间 `[start, end)`；`end` 缺省当前时间、`start` 缺省 `end - 3600`。CLI 恒显式传时间。
-- 未知字段一律拒绝（`deny_unknown_fields`），避免拼错字段名被静默忽略。
+- `-f KEY=VALUE` 在第一个 `=` 分割，key 不能为空，value 始终按字符串发送；
+- `-f` 与 `-k` 至少一个，keywords 最多出现一次；
+- 请求体为 `{"query":{"filter":...,"keywords":...},"start":...,"end":...}`；
+- CLI 不在本地执行 service 预置合并、provider 查询或响应清洗，这些都是外部服务的职责。
 
-### 3.2 预置条件：Server 是查询语义的权威
+服务端契约仍要求预置 filters/keyword 优先，但该安全语义由服务端测试保证，不能再由纯 CLI 仓库的测试代替。
 
-service 可配置 `filters` 和 `keyword`。合并规则：
+### 3.2 时间与 URL
 
-- 请求 filter 与预置 filters 合并，**同名字段以预置值为准**（`filter.extend(service.filters)`）；
-- 预置 `keyword` 存在时**整体替换**请求 keywords，不做拼接——拼接两段自由文本几乎必然产生病态查询。
+时间输入支持带时区 ISO 8601/RFC 3339、`YYYY-MM-DD HH:mm:ss` 和 epoch seconds，统一转换为秒级时间戳。naive 时间固定按 UTC+8 解释，保证同一命令在不同机器上语义一致。
 
-动机：预置条件常用于环境隔离（如 `environment = "pre"`）或数据源裁剪（按 `service` 字段过滤），必须不可被请求方绕过，否则 Agent 可能读到其他环境的数据。
+默认区间是 UTC+8 当天零点到当前时刻；要求 `start < end`，对外语义为 `[start, end)`。
 
-### 3.3 响应归一化
+`base_url` 必须是 HTTP(S) URL。CLI 保留其已有路径前缀，追加 service 和 `_search` 两个 URL segment，不自行实现 provider 路由。
 
-所有 provider 统一输出：
+### 3.3 HTTP、输出与错误
 
-```json
-{"took": 5, "count": 1, "complete": true, "logs": [...]}
-```
+- 搜索使用 reqwest blocking client，CLI 自身没有运行时服务和后台状态；
+- token 以 `Authorization: Bearer <JWT>` 发送；
+- localhost、127.0.0.1、::1 自动禁用系统代理，避免企业代理拦截本机请求；
+- 2xx 且响应为 JSON 时 pretty-print，否则原样输出；
+- 非 2xx 输出状态码与响应体并非零退出；
+- stdout 的 EPIPE 被忽略，使 `| head` 正常结束而不 panic。
 
-- `logs` 直接是日志对象数组，去掉 ES `hits.hits._source` 包装（无 `_source` 时退用 hit 本身）。
-- `count` 是本次返回条数，**不是**总匹配数（不做额外 count 查询）。
-- `took`/`complete` 为可选：SLS 的 `took` 是本地计时的所有分页总耗时，ES 直接取上游 `took`，TLS 汇总各页 `ElapsedMillisecond`；`complete` 在 SLS 表示所有分页 `Complete`，在 ES 表示未 `timed_out`，在 TLS 表示所有分页 `ResultStatus=complete` 且最后一页 `ListOver=true`（触及 1000 条上限或上游只返回部分结果时如实报 `false`）。字段缺失即信息缺失，不造默认值。
+CLI 不负责把服务端错误转换成另一套模型，因此 Python 重实现需要保持响应和错误的 HTTP 语义。
 
-### 3.4 输出清洗管线：parse → ignore
+## 4. 本地配置与凭证
 
-日志源（尤其 OTel 采集链路）常见两类噪音：整段 JSON 被压成字符串、大量 SDK 元数据字段。清洗在 `ServiceProvider` 层对每条 log 顺序执行：
+`config.toml` 是用户维护的配置，包含 `base_url`、可选静态 token 和 OIDC 参数。默认路径是用户主目录下的 `.config/chuanshanjia/`；Windows 优先使用非空 `USERPROFILE` 定位主目录。
 
-1. **`json_fields` JSON 解析**
-   - 空列表（默认）：只扫描 `_source` 顶层值，形如 `{...}` / `[...]` 的字符串尝试解析；**不递归**展开嵌套字符串。
-   - 非空列表：只处理配置的路径；沿路径逐层解析（父层解析成功后继续深入），因此 `attribute."kv.legacy"` 会先解析 `attribute` 再解析其中的 `kv.legacy`。
-   - 解析失败的字符串保持原样，不报错。
-2. **`ignores` 字段删除**（在解析之后执行，因此能删除解析产物里的嵌套字段）
-   - 每一级先按完整字面键匹配（兼容字段名本身含点号的情况），再按嵌套路径逐级下钻。
-   - 缺失路径静默跳过；数组不支持删除元素。
+`chuanshanjia config` 幂等创建默认模板，不覆盖已有文件，然后调用 `EDITOR`。编辑器命令通过 shell-words 解析，支持携带参数。
 
-对象路径语法：段以 `.` 分隔，含点号的字段名用双引号包裹并支持 `\"` 转义。路径在**启动时**解析并校验，非法路径直接启动失败（fail-fast，见 3.6）。
+`credentials.toml` 是程序产物，与配置分开：
 
-### 3.5 认证：自建 OIDC + Ed25519-only JWT
+- 保存 access token、refresh token、过期时间和 OIDC 会话所需信息；
+- Unix 下必须创建为 `0600`；
+- 不保存 client_secret，不将凭证内容写入日志；
+- `logout` 只需删除该文件即可清理本地会话。
 
-信任链完全来自 OIDC issuer，没有本地密钥文件模式：
+搜索时 token 优先级为 `--token` > 本地登录会话 > 配置文件静态 token。显式参数优先便于一次性覆盖，本地会话优先于静态配置则避免过期配置遮蔽自动续期结果。
 
-- **发现与拉取**：启动时请求 `{issuer}/.well-known/openid-configuration`，校验文档 `issuer` 与配置一致（忽略末尾 `/`），再按 `jwks_uri` 拉取 JWKS；两者都只允许 `http`/`https`。任何一步失败（不可达、格式错误、不一致、无可用 Ed25519 公钥）即启动失败。动机：issuer 就是信任根的声明，配置里再放一份本地公钥文件只会引入“两份真相”和额外的分发步骤。
-- **只支持 EdDSA/Ed25519**。单一算法排除 `alg` 混淆攻击与 RSA/HMAC 密钥误用这一整类问题，实现也最简单；自建 IdP 只签 `EdDSA`，不牺牲兼容性。
-- **claims**：`exp` 必填，`nbf` 存在则校验，leeway 为 0；**`iss` 必须等于配置的 issuer**（静默接受缺失 `iss` 会让其他 issuer 的 token 也能通过）；`aud` 必须命中 `server.oidc_audiences`（见 5.2）。
-- **kid 规则**：多 key 时 token 必须携带能匹配的 `kid`；单 key 时可省略。
-- **密钥轮换**：未知 `kid` 会触发一次 JWKS 重新拉取并重试验签，因此 IdP 轮换后**无需重启**。刷新受 30 秒最小间隔限制，避免无效 token 引发对 IdP 的请求放大；刷新失败只记日志、保留旧公钥集。
-- **验证结果缓存**（moka，30 分钟滑动过期）：
-  - 验签是 CPU 敏感操作，缓存把重复 token 的成本降为一次哈希查找；
-  - 失败结果同样缓存，避免被无效 token 打爆；
-  - 成功缓存命中时仍检查 token 自身 `exp`，过期即改判失败——否则缓存会把短命 token 变成 30 分钟长效凭证；
-  - 滑动过期而非固定 TTL：活跃 token 不必反复验签，闲置条目自动回收。
-- JWKS 刷新用可注入的 `JsonFetcher` 抽象，测试里替换为路由队列 mock，无需网络即可覆盖发现失败、issuer 不匹配、未知 kid 刷新、刷新限频等分支。
+## 5. OIDC 设计
 
-### 3.6 配置：强校验 + fail-fast
+### 5.1 信任链
 
-所有配置结构 `deny_unknown_fields`，且一切可在启动时确定的错误都在启动时失败：
+信任链是 **CLI 向 IdP 获取 token，外部服务验证 token**。服务端不通过 CLI 签发 token，CLI 也不自行判断业务权限。
 
-- 未知字段、缺失 `server.oidc_issuer` 或它不是绝对 http(s) URL、未知 provider 变体；
-- service 引用不存在的 storage、service 名含 `/` 或为空、`index` 为空；
-- `json_fields`/`ignores` 路径非法；
-- 凭证（含环境变量形态）缺失或为空。
+登录前读取 `base_url` 下的 RFC 9728 资源元数据：
 
-运行期不再有“配置错误”这类错误类别；配置错误绝不让进程带着半套配置上线。
+- `resource` 必须与 CLI 配置完全一致；
+- issuer 去掉末尾 `/` 后必须出现在 `authorization_servers`；
+- 不用 `scopes_supported` 做前置校验，因为业务 scope 可由 IdP 按 resource 授予，而不是由客户端请求决定；
+- 元数据不可用或检查失败时不进入浏览器授权流程。
 
-凭证双形态：`access_key_id = "literal"` 或 `access_key_id = { env = "NAME" }`，后者在启动时解析，缺失即启动失败。OIDC 公钥不走配置，而是启动时从 issuer 发现，因此不存在本地密钥文件需要分发或轮换。
+### 5.2 授权码 + PKCE
 
-### 3.7 错误模型
+CLI 是无法保守 secret 的公开客户端，因此使用：
 
-`ProviderError` 统一输出 `{"error": {"type": ..., "reason": ...}, "status": ...}`：
+- `token_endpoint_auth_method = none`；
+- authorization code + PKCE S256；
+- 每次登录随机生成 `state` 和 code verifier，回调必须先校验 state；
+- loopback callback，不开放非本机监听。
 
-- **业务错误**（4xx）：`service_not_found`、`invalid_time_range`、`unsupported_sls_filter`、`unsupported_tls_filter`，由本层生成。
-- **上游错误**：ES 非 2xx 响应原样保留状态码和 JSON 错误体；SLS `Server` 错误保留 HTTP 状态与 `error_code`，`request_id` 拼进 reason 便于找阿里云排查；TLS 非 2xx 且错误体含 `ErrorCode`/`ErrorMessage` 时保留状态码与错误码，`X-Tls-Requestid` 拼进 reason，否则原样透传错误体。
-- **基础设施错误**：网络失败、凭证无效、响应解码失败统一 502（`es_request_failed`/`invalid_es_response`/`sls_request_failed`/`tls_request_failed`/`invalid_tls_response`），reason 去掉 URL（含凭证信息）。
+默认 redirect URI 为 `http://127.0.0.1:0/callback`，实际监听端口由系统分配并写入授权请求，避免并发登录争用固定端口。IdP 若不支持 RFC 8252 的 loopback 端口匹配，可显式配置固定的已注册 redirect URI。
 
-401 响应遵循 RFC 6750：缺凭证时无响应体，仅 `WWW-Authenticate: Bearer realm="chuanshanjia"`；token 无效时附 `error="invalid_token"` 与 JSON 错误体。
+本地登录会话只接受 JWT 形态 access token，与外部服务的离线 JWT 验签约定一致。
 
-## 4. Provider 实现
+### 5.3 Scope、resource 与 audience
 
-`SearchProvider` 是唯一抽象：
+CLI 默认只请求 `openid offline_access`，不内置业务 scope。`offline_access` 用于取得 refresh token，存在时附加 `prompt=consent`。配置或参数可整体覆盖 scope 字符串。
 
-```rust
-#[async_trait]
-pub trait SearchProvider: Send + Sync {
-    async fn search(&self, index: &str, request: &SearchRequest) -> Result<Value, ProviderError>;
-}
-```
+`resource` 没有默认值，必须显式提供，并同时发往授权端点与 token 端点（RFC 8707）。IdP 据此决定 access token 的 audience 和实际业务 scope。
 
-`ServiceProvider` 持有 storage 名 → provider 实例的映射；service 引用 storage，多个 service 可复用同一 storage。测试用 `MockProvider`/`MockSlsClient` 替换真实实现，ES 与 TLS 走 mockito 模拟 HTTP 上游。
+CLI 的 resource、外部服务接受的 audience 和 IdP 资源登记必须一致。验签、audience 和 scope 的最终强制执行属于服务端；其不可放宽的规则见迁移契约。
 
-### 4.1 Elasticsearch
+### 5.4 续期
 
-- filter → `term` 查询（字段名原样传递，不加 `.keyword`，由索引 mapping 决定匹配行为）。
-- keywords → `multi_match`，`fields: ["*"]`、`fuzziness: "AUTO"`——不知道字段清单时的保守全文搜索。
-- 时间 → 固定 `@timestamp` 字段的 `range`，`gte`/`lt` + `format: "epoch_second"`。
-- 请求无分页参数；上游返回多少转多少。
+本地会话进入 60 秒过期窗口时，搜索先使用 refresh token 静默续期：
 
-### 4.2 阿里云 SLS
+- 成功后回写凭证文件；
+- IdP 未轮换 refresh token 时保留旧值；
+- 失败则提示重新登录，不静默退回一个已知过期 token；
+- `expires_at` 优先由 token 响应的 `expires_in` 计算；
+- 授权码兑换未返回 `expires_in` 时，退回读取 JWT `exp`，避免把短命 token 当作永久有效。
 
-- 使用[官方 Rust SDK](https://github.com/aliyun/aliyun-log-rust-sdk) 的 `GetLogs` 接口，`from`/`to` 对应 `[start, end)`。
-- 查询构造为原生查询语法：`"keywords" AND "field": value | with_pack_meta`。空查询用 `*`；空字符串 keywords 视为未提供；字符串统一双引号并转义 `\` 与 `"`；数字/布尔保留标量形式；null/数组/对象值直接 400 拒绝（SLS 无对应语义）。字段匹配依赖 SLS 索引配置，分词行为不在本层控制。
-- **分页策略**：每页 `line=100`，`offset += 100` 翻页；页面不满 100 条或累计达到 1000 条（10 页）即停。`complete` 汇总所有页的 `Complete` 状态，向调用方诚实暴露“可能没拉全”。
-- `__pack_meta__` 等元数据随 `with_pack_meta` 返回，再由 `ignores` 清理。
+### 5.5 登出与吊销
 
-### 4.3 火山云 TLS
+默认登出先按 RFC 7009 调 IdP revocation endpoint 吊销 refresh token，再删除本地凭证。公开客户端不需要 client_secret。
 
-- 无官方 Rust SDK，用 reqwest 直连 `POST /SearchLogs`（`x-tls-apiversion: 0.3.0`），按[火山引擎签名机制](https://www.volcengine.com/docs/6470/112168)对每个请求签名：HMAC-SHA256，服务名固定 `TLS`，scope 为 `{date}/{region}/TLS/request`，signed headers 为 `content-type;host;x-content-sha256;x-date[;x-security-token];x-tls-apiversion`，密钥链 HMAC(SK, date)→region→service→`request`。签名实现与官方 Go/Python SDK 逐字对齐，并用独立实现的参考向量单测锁定；凭证在启动时从配置解析（含 STS `security_token`），不进日志。
-- `service.index` 即 Topic ID。`StartTime`/`EndTime` 由 epoch seconds 乘 1000 得到（API 要求毫秒），`Limit=100`、`Sort=desc`（时间逆序，新日志在前）。
-- 查询构造为 [TLS 检索语法](https://www.volcengine.com/docs/6470/1206705)：`"keywords" AND key:value`。空查询用 `*`；空字符串 keywords 视为未提供；字符串统一双引号并转义 `\` 与 `"`（官方文档：引号内仅需转义这两者）；纯 `[A-Za-z0-9_]` 字段名原样传递，含特殊字符的字段名按文档用双引号包裹；数字/布尔保留标量形式；null/数组/对象值 400 拒绝（`unsupported_tls_filter`）。字段匹配依赖 TLS 键值索引配置，分词行为不在本层控制。
-- **分页策略**：Context 游标翻页——上一页 `ListOver=false` 且页满 100 条且未达 1000 条上限时，携带上一页 `Context` 续查；`complete` 要求所有页 `ResultStatus=complete` 且最后一页 `ListOver=true`，`took` 汇总各页 `ElapsedMillisecond`。
-- 错误映射见 3.7；`__path__`、`__source__` 等元数据字段由 `ignores` 清理。
+吊销是尽力而为：IdP 不可达时给出警告仍删除本地文件，保证离线可登出；`--local` 明确表示跳过吊销。
 
-## 5. CLI 设计
-
-- 依赖面最小：usage-rs 定义参数，reqwest blocking 发请求；无运行时服务、无后台状态。
-- 时间输入三形态（带时区 ISO 8601、`YYYY-MM-DD HH:mm:ss` 固定 UTC+8、epoch seconds），统一转 epoch seconds。naive 时间按 UTC+8 解释而不取系统时区，保证跨机器行为一致。
-- `--start` 默认 UTC+8 当天零点、`--end` 默认当前时刻，覆盖“查今天的日志”这一最高频场景。
-- 对 localhost/127.0.0.1/::1 自动禁用系统代理，避免企业代理拦截本机流量。
-- 输出：响应是 JSON 则 pretty-print，否则原样打印；非 2xx 打印状态码与响应体并以非零码退出。stdout 写入忽略 EPIPE，`| head` 不再触发 panic。
-- `chuanshanjia config`：幂等创建默认配置后调用 `EDITOR`（经 shell-words 解析，支持带参数的编辑器命令）。
-
-### 5.1 登录：CLI 直接和 IdP 对话
-
-信任链只有一条：**CLI 向 IdP 登录拿 token，Server 拿 IdP 的公钥验 token**。Server 不签发 token——否则它就要自己管签名密钥、轮换、续期、吊销和用户映射，等于重造一个 IdP，还多一跳信任跳跃。
-
-- **登录前配置检查**：`resource` 没有内置默认值，必须由配置或 `--resource` 显式提供。CLI 先读取 `base_url` 下的 RFC 9728 资源元数据，核对 `resource` 与 `authorization_servers` 中的 issuer；**不** 比对 `scopes_supported`——其中的业务 scope 由 IdP 按 resource 授予，与客户端请求的 scope 无关，比对只会把正确配置判成错误。任一 `resource`/issuer 检查失败或元数据不可用都不进入 OIDC 授权流程。这样本地配置错误会在打开浏览器前暴露，但不能替代 IdP 对 resource 的登记检查。
-- **授权码 + PKCE（S256）+ 公开客户端**：CLI 无法保守 secret（二进制里必然泄漏），所以用 `token_endpoint_auth_method = none` + PKCE；IdP 侧注册公开客户端，重定向 URI 使用 loopback callback。`state` 与 PKCE `code_verifier` 均每次随机生成，回调里先校 `state` 再换 token。
-- **随机 loopback 端口**：按 RFC 8252，IdP 匹配 loopback `redirect_uri` 时忽略端口，因此默认 `http://127.0.0.1:0/callback`——`:0` 让系统挑空闲端口，实际端口再写进授权请求。这样并发登录不会抢端口，也不需要预注册固定端口。监听端口始终从 `redirect_uri` 推导；需要固定端口时用 `--redirect-uri http://127.0.0.1:8765/callback`。
-- **JWT access token**：OIDC 本地登录会话只使用 JWT 形态的 `access_token`；不透明或格式不符时报错，因为 Server 只支持离线验签。
-- **scope 与 consent**：CLI 默认请求 `scope = "openid offline_access"`，只含标准 OIDC scope，不含任何业务 scope；配置项 `scope` 或 `--scope` 可整体覆盖。`offline_access` 用于取得 `refresh_token`，带它时附加 `prompt=consent`（IdP 通常要求显式同意才下发 refresh token）。既然客户端不请求业务 scope，业务授权就只能由 IdP 根据 `resource` 决定——这也是 CLI 不再把 `scopes_supported` 当作前置条件的理由。
-- **业务 scope 由 IdP 实际授予**：实际签发的 scope 取决于 IdP 对 `resource`（或 client）的登记，与客户端请求的 scope 未必相同（按 resource 授予的 IdP 会直接覆盖请求值）。Server 仍用 `oidc_required_scopes` 检查实际 token，验签通过不代表拥有业务权限。
-- **token 存储**：`~/.config/chuanshanjia/credentials.toml`，Unix 下 `0600`；不放进 `config.toml`，因为后者是用户手改的配置，凭证应是程序维护的产物（也便于 `logout` 只删一个文件）。
-- **续期**：`search` 发现 `expires_at` 进入 60 秒窗口就先用 `refresh_token` 静默续期并回写文件，失败则提示重新 `login`。若 IdP 不轮换 refresh token，则保留旧值。`expires_at` 优先取 token 响应的 `expires_in`；部分 IdP 在授权码兑换时不返回该字段，此时回退到 access token 的 JWT `exp`，否则 `expires_at` 为空会被当成“永不过期”，10 分钟有效期的 token 将在过期后直接 401 而永不续期。
-- **token 选择顺序**：`--token` > 本地会话 > 配置文件 `token`。保留后两者是为了兼容尚未接入 OIDC、手工拿 token 的场景。
-- **`--no-browser`**：只打印授权 URL，供 SSH/无桌面环境与自动化测试使用。
-
-未实现：device code flow、token 缓存于系统钥匙串。
-
-### 5.2 `aud` 校验
-
-Server 用 `server.oidc_audiences` 打开 `Validation::set_audience`，并把 `aud` 列为必需 claim：缺失或不在列表内一律 401。多受众 token 按 RFC 7519 处理——只要其中一项命中即接受。
-
-IdP 按 RFC 9068 签发 JWT access token 时（`typ: at+jwt`），`aud` 取自 RFC 8707 的 `resource`，因此配置值使用资源标识，例如 `https://logs.example.com`：验的正是「这张 token 是签给日志服务的」。
-
-### 5.3 `scope` 校验与资源元数据
-
-- **`server.oidc_required_scopes`**：`aud` 只回答「这张 token 是不是给我」，回答不了「允许做什么」。配置后要求 token 的 `scope` 覆盖全部所需项（兼容 RFC 9068 的空格分隔字符串与部分 IdP 的数组编码）。留空则跳过。业务 scope 的可用值和授予规则由实际 IdP 配置决定，discovery 的 `scopes_supported` 不一定包含它们，因此应以实际签发的 token 或 IdP 配置为准。
-- **RFC 9728 元数据**：后端发布 `/.well-known/oauth-protected-resource`，声明 `resource`、`authorization_servers` 与 `scopes_supported`，作为 CLI 登录前校验本地配置的依据（目前只用前两项），而不是由 CLI 内置一个可能不适用的默认资源标识。这里复用 `oidc_audiences[0]` 作为资源标识，避免 Server 再引入一个必须保持同步的配置项。
-
-### 5.4 登出即吊销
-
-`chuanshanjia logout` 先按 RFC 7009 调 IdP 的 `revocation_endpoint` 吊销 refresh token，再删本地凭证。撤销是**尽力而为**：IdP 不可达时给警告并照常删除本地文件，否则离线环境无法登出；`--local` 用于明确表示「只清理本地」。
-
-公开客户端（`token_endpoint_auth_method=none`）可以直接调撤销端点，不需要 client secret。
+未实现 device code flow 和系统钥匙串存储。
 
 ## 6. 测试策略
 
-- **单元测试在各模块内**（`#[cfg(test)]`）：时间解析与默认值、配置校验（含 `server.example.toml` 必须可解析的回归测试）、OIDC 发现（issuer 不一致、非 http URL）与 JWT 全部分支（算法、kid、exp/nbf/iss、未知 kid 刷新、刷新限频、缓存滑动过期与命中后过期改判）、对象路径解析、JSON 清洗管线、预置条件合并、ES 查询翻译、SLS 查询构造/转义/分页/错误映射、TLS 查询构造/转义、签名参考向量（含 STS）与 Host/路径推导。
-- **HTTP 层测试**用 axum `oneshot`：路由、认证中间件、错误响应形状；ES 与 TLS provider 在此层用 mockito 模拟上游（含签名头形状、请求体、Context 分页与错误映射）。
-- **端到端测试** `tests/cli.rs`：assert_cmd 驱动真实 CLI 二进制，mockito 模拟 ES、Server 与 IdP，覆盖 CLI → Server → ES 全链路（含预置条件不可被 CLI 覆盖），以及登录全流程（从 CLI stdout 取授权 URL、取出 `state` 后向 loopback 回调、校 PKCE 参数、换 token、写 `0600` 凭证文件）、伪造 `state` 被拒、过期会话静默续期。
-- 原则：不读真实用户配置、不请求真实云服务、无 sleep 依赖竞态（缓存测试用注入的超时与时间）。
-- CI（`.github/workflows/ci.yml`）在 macOS/Ubuntu/Windows 三平台跑 `fmt-check → test → lint → build`，clippy 以 `-D warnings` 要求零告警。
+- `src/main.rs` 和 `src/oidc.rs` 内单元测试覆盖时间、URL、配置辅助逻辑、JWT 过期解析和 OIDC 细节；
+- `tests/cli.rs` 用 assert_cmd 执行真实二进制，以 mockito 模拟外部 HTTP 服务与 IdP；
+- 搜索测试验证请求 body、Bearer token 优先级、响应输出和非 2xx 错误；
+- 登录测试覆盖元数据预检、授权 URL、PKCE、state、loopback 回调、`0600` 凭证、静默续期和登出；
+- 测试主目录与外部命令均使用临时目录，不读取真实用户配置；
+- 不启动原 Rust backend，不请求真实 IdP 或云服务；
+- CI 在 macOS、Ubuntu、Windows 运行 `fmt-check → test → lint → build`，clippy 使用 `-D warnings`；release 只构建 CLI。
 
-## 7. 已知限制与演进方向
+## 7. 演进边界
 
-| 项 | 现状 | 方向 |
-| --- | --- | --- |
-| `lookups` | 仅配置概念，无运行时行为 | 用于声明 trace 关联查询要访问的其他 service |
-| API 分页/排序/聚合 | 未提供；SLS 与 TLS 单次最多 1000 条，TLS 固定按时间逆序 | 视 Agent 实际使用痛点再决定是否引入 |
-| 完整 ES DSL | 不支持 `bool`/`must` 等 | 维持最小查询模型，避免语义泄漏 |
-| CLI 登录 | 授权码 + PKCE（loopback 回调） | 若 IdP 支持 device code 可补；token 可选存入系统钥匙串 |
-| `ignores` | 不支持删除数组元素 | 如有需求按 JSON Path 下标扩展 |
+- 修改 CLI 外部行为时，同步 README、设计文档和端到端测试；
+- 修改外部 HTTP/OIDC 契约时，同步 `docs/backend-migration.md`，并在 Python 服务项目落实兼容测试；
+- 新增 provider、服务端认证或清洗能力不属于本仓库代码变更；
+- 只有在明确决定改变产品边界时，才考虑让 CLI 直连存储；当前设计保持 HTTP 解耦。

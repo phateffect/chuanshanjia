@@ -1,9 +1,6 @@
-use std::{fs, net::TcpListener, sync::Arc, thread};
+use std::{fs, net::TcpListener, thread};
 
 use assert_cmd::Command;
-use chuanshanjia_backend::{
-    app_with_provider, config::AppConfig, provider::service::ServiceProvider,
-};
 use mockito::{Matcher, Server};
 use serde_json::json;
 use tempfile::TempDir;
@@ -63,47 +60,6 @@ fn write_config(home: &TempDir, contents: &str) {
     let config_dir = home.path().join(".config").join("chuanshanjia");
     fs::create_dir_all(&config_dir).expect("config directory should be created");
     fs::write(config_dir.join("config.toml"), contents).expect("config should be written");
-}
-
-fn spawn_backend(es_url: &str) -> String {
-    let config: AppConfig = toml::from_str(&format!(
-        r#"
-        [server]
-        oidc_issuer = "https://idp.example.com"
-        oidc_audiences = ["test-audience"]
-
-        [storages.es]
-        provider = "elasticsearch"
-        base_url = "{es_url}"
-
-        [services.foo]
-        storage = "es"
-        index = "app-logs"
-        keyword = "preset-keyword"
-
-        [services.foo.filters]
-        service = "order"
-        "#
-    ))
-    .expect("backend config should be valid");
-    let provider = ServiceProvider::from_config(config).expect("provider should be configured");
-    let app = app_with_provider(Arc::new(provider));
-    let listener = TcpListener::bind("127.0.0.1:0").expect("backend port should be available");
-    let address = listener.local_addr().unwrap();
-    listener.set_nonblocking(true).unwrap();
-
-    drop(thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            axum::serve(listener, app).await.unwrap();
-        });
-    }));
-
-    format!("http://{address}")
 }
 
 #[cfg(unix)]
@@ -384,81 +340,6 @@ fn search_rejects_invalid_or_reversed_time() {
     assert!(
         stderr.contains("start must be earlier than end"),
         "unexpected stderr: {stderr}"
-    );
-}
-
-#[test]
-fn cli_cannot_override_backend_preset_query() {
-    let start = 1760000000;
-    let end = 1760003600;
-    let upstream = json!({
-        "took": 3,
-        "timed_out": false,
-        "hits": {
-            "total": {"value": 1, "relation": "eq"},
-            "hits": [{"_source": {"message": "from backend"}}]
-        }
-    });
-    let mut es_server = Server::new();
-    let es_request = es_server
-        .mock("POST", "/app-logs/_search")
-        .match_header("content-type", "application/json")
-        .match_body(Matcher::Json(json!({
-            "query": {
-                "bool": {
-                    "filter": [
-                        {"term": {"service": "order"}},
-                        {"range": {"@timestamp": {
-                            "gte": start,
-                            "lt": end,
-                            "format": "epoch_second"
-                        }}}
-                    ],
-                    "must": [{
-                        "multi_match": {
-                            "query": "preset-keyword",
-                            "fields": ["*"],
-                            "fuzziness": "AUTO"
-                        }
-                    }]
-                }
-            }
-        })))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(upstream.to_string())
-        .expect(1)
-        .create();
-    let backend_url = spawn_backend(&es_server.url());
-    let home = TempDir::new().expect("temporary home should be created");
-    write_config(&home, &format!("base_url = \"{backend_url}\"\n"));
-
-    let assert = chuanshanjia(&home)
-        .args([
-            "search",
-            "foo",
-            "-f",
-            "service=checkout",
-            "-k",
-            "request-keyword",
-            "--start",
-            "1760000000",
-            "--end",
-            "1760003600",
-        ])
-        .assert()
-        .success();
-
-    es_request.assert();
-    let output: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
-    assert_eq!(
-        output,
-        json!({
-            "took": 3,
-            "count": 1,
-            "complete": true,
-            "logs": [{"message": "from backend"}]
-        })
     );
 }
 

@@ -5,10 +5,10 @@ rust = "stable"
 run = "cargo fmt --all --check"
 
 [tasks.test]
-run = "cargo test --workspace"
+run = "cargo test"
 
 [tasks.lint]
-run = "cargo clippy --workspace --all-targets -- -D warnings"
+run = "cargo clippy --all-targets -- -D warnings"
 
 [tasks.build]
-run = "cargo build --workspace"
+run = "cargo build"

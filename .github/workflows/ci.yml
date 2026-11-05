@@ -46,16 +46,3 @@ jobs:
           name: chuanshanjia-${{ runner.os }}-${{ runner.arch }}
           path: target/release/chuanshanjia${{ matrix.extension }}
           if-no-files-found: error
-
-  build-server:
-    name: Build Server (Linux)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
-      - run: mise exec -- cargo build --locked --release --package chuanshanjia-backend --bin chuanshanjia-server
-      - uses: actions/upload-artifact@v7
-        with:
-          name: chuanshanjia-server-${{ runner.os }}-${{ runner.arch }}
-          path: target/release/chuanshanjia-server
-          if-no-files-found: error
