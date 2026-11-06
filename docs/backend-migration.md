@@ -182,14 +182,12 @@ access_key_secret = { env = "ACCESS_KEY_SECRET" }
 
 ```json
 {
-  "query": {
-    "filter": {
-      "service": "order",
-      "attempt": 2,
-      "retryable": true
-    },
-    "keywords": "connection timeout"
+  "filter": {
+    "service": "order",
+    "attempt": 2,
+    "retryable": true
   },
+  "keywords": "connection timeout",
   "start": 1760000000,
   "end": 1760003600
 }
@@ -198,14 +196,13 @@ access_key_secret = { env = "ACCESS_KEY_SECRET" }
 规则：
 
 - 请求必须使用 JSON Content-Type（CLI 发送 `application/json`）；不支持的 Content-Type 由 HTTP 框架在 handler 前拒绝。
-- 顶层只允许 `query`、`start`、`end`；`query` 必填。
-- `query` 只允许 `filter`、`keywords`；`filter` 缺省为空对象，`keywords` 可省略。
+- 顶层只允许 `filter`、`keywords`、`start`、`end`。
+- `filter` 缺省为空对象，`keywords` 可省略。
 - `filter` 是字段等值条件，多个条件按 AND 组合。字符串、数字和布尔值保留 JSON 类型；SLS/TLS 额外拒绝 null、数组和对象。
 - `keywords` 是一个完整字符串，不在统一层拆词；分词和匹配语义由上游及索引配置决定。
-- `start`、`end` 是有符号 epoch seconds，有效区间是 `[start, end)`，允许负时间戳。
-- `end` 缺省为服务器当前秒级时间；`start` 缺省为 `end - 3600`。
-- `start >= end` 返回 400；默认一小时回推发生整数下溢也返回 400。
-- CLI 总是显式发送 `start` 和 `end`，但 Python 服务仍须实现默认值供其他客户端使用。
+- `start`、`end` 是必传的有符号 epoch seconds，有效区间是 `[start, end)`，允许负时间戳。
+- `start >= end` 属于请求结构校验失败，返回 422；CLI 也会在发送前拒绝该区间。
+- CLI 总是显式发送 `start` 和 `end`，并负责生成默认时间；Python 服务端不补时间默认值。
 - 请求 JSON 语法错误返回 400；结构反序列化失败（包括未知字段）返回 422。这两类错误发生在搜索 handler 之前，原实现不保证使用统一错误 JSON 外形。
 
 ### 3.3 成功响应

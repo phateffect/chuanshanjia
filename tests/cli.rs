@@ -149,10 +149,8 @@ fn search_sends_filters_keywords_and_time_range() {
         .mock("POST", "/foo/_search")
         .match_header("content-type", "application/json")
         .match_body(Matcher::Json(json!({
-            "query": {
-                "filter": {"filterA": "aValue", "filterB": "bValue"},
-                "keywords": "someKeyword"
-            },
+            "filter": {"filterA": "aValue", "filterB": "bValue"},
+            "keywords": "someKeyword",
             "start": start,
             "end": end
         })))
