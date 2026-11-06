@@ -53,7 +53,7 @@ CLI 保留最小查询模型：service、可重复的等值 filter、单个 keyw
 
 - `-f KEY=VALUE` 在第一个 `=` 分割，key 不能为空，value 始终按字符串发送；
 - `-f` 与 `-k` 至少一个，keywords 最多出现一次；
-- 请求体为 `{"query":{"filter":...,"keywords":...},"start":...,"end":...}`；
+- 请求体为平铺的 `{"filter":...,"keywords":...,"start":...,"end":...}`；
 - CLI 不在本地执行 service 预置合并、provider 查询或响应清洗，这些都是外部服务的职责。
 
 服务端契约仍要求预置 filters/keyword 优先，但该安全语义由服务端测试保证，不能再由纯 CLI 仓库的测试代替。

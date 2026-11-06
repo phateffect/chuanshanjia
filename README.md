@@ -125,7 +125,7 @@ token 保存在 `~/.config/chuanshanjia/credentials.toml`，Unix 下权限为 `0
 
 CLI 依赖两个服务端接口：
 
-- `POST /{service}/_search`：发送 `query.filter`、`query.keywords`、`start`、`end` 和 Bearer token，接收 JSON 响应；
+- `POST /{service}/_search`：发送平铺的 `filter`、`keywords`、`start`、`end` 和 Bearer token，接收 JSON 响应；
 - `GET /.well-known/oauth-protected-resource`：登录前读取资源与 issuer 元数据。
 
 原 Rust 服务端已经移出本仓库。Python 重实现所需的完整请求、响应、认证、provider 和错误契约见 [docs/backend-migration.md](docs/backend-migration.md)。

@@ -478,16 +478,14 @@ fn search(args: SearchArgs) -> Result<()> {
         .into_iter()
         .map(|filter| (filter.key, filter.value))
         .collect::<BTreeMap<_, _>>();
-    let mut query = serde_json::Map::new();
-    query.insert("filter".to_owned(), serde_json::json!(filter));
+    let mut body = serde_json::Map::new();
+    body.insert("filter".to_owned(), serde_json::json!(filter));
     if let Some(keywords) = args.keywords {
-        query.insert("keywords".to_owned(), keywords.into());
+        body.insert("keywords".to_owned(), keywords.into());
     }
-    let body = serde_json::json!({
-        "query": query,
-        "start": args.start.0,
-        "end": args.end.0,
-    });
+    body.insert("start".to_owned(), args.start.0.into());
+    body.insert("end".to_owned(), args.end.0.into());
+    let body = serde_json::Value::Object(body);
 
     let mut client = reqwest::blocking::Client::builder();
     if matches!(
