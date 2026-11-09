@@ -186,7 +186,7 @@ access_key_secret = { env = "ACCESS_KEY_SECRET" }
 - `leyan_seller_id=<UUID>`：转换为 `leyan_seller_id=eq.<uuid>`；
 - `platform=<平台>&seller_nick=<昵称>`：转换为 `platform=eq.<平台>&seller_nick=ilike.*<昵称>*`，昵称缺 `platform` 时返回 422。
 
-`platform` 可与 `seller_id`、`leyan_seller_id` 组合，作为附加等值条件进一步限定平台。查询使用 Mixer 的 `sellers` 表，`select=leyan_seller_id,platform,seller_id,enabled`，返回 `leyan_seller_id`（UUID）、`platform`、`seller_id`、`enabled` 的数组；未配置 Mixer 返回 503，上游失败返回 502。
+`platform` 可与 `seller_id`、`leyan_seller_id` 组合，作为附加等值条件进一步限定平台。查询使用 Mixer 的 `sellers` 表，`select=leyan_seller_id,platform,seller_id,seller_nick,store_title,enabled`，并固定 `order=organization_id,platform,seller_id`，返回 `leyan_seller_id`（UUID）、`platform`、`seller_id`、`seller_nick`、`store_title`、`enabled` 的数组，`store_title` 可能为 `null`；未配置 Mixer 返回 503，上游失败返回 502。
 
 ### 3.2 搜索请求
 

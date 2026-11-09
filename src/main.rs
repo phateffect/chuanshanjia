@@ -166,7 +166,7 @@ impl FromStr for Timestamp {
         }
 
         Err(format!(
-            "invalid timestamp {value:?}; expected ISO 8601 with timezone, YYYY-MM-DD HH:mm:ss (+08:00), or epoch seconds"
+            "时间格式无效：{value:?}；请使用带时区的 ISO 8601、YYYY-MM-DD HH:mm:ss（+08:00）或 epoch 秒"
         ))
     }
 }
@@ -183,7 +183,7 @@ impl FromStr for Filter {
         let (key, value) = value
             .split_once('=')
             .filter(|(key, _)| !key.is_empty())
-            .ok_or_else(|| "filter must use KEY=VALUE with a non-empty key".to_owned())?;
+            .ok_or_else(|| "filter 必须写成 KEY=VALUE，且 key 不能为空".to_owned())?;
         Ok(Self {
             key: key.to_owned(),
             value: value.to_owned(),
@@ -236,7 +236,7 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn config_dir() -> Result<PathBuf> {
-    let home = home_dir().context("could not determine the user home directory")?;
+    let home = home_dir().context("无法确定用户主目录")?;
     Ok(home.join(".config").join("chuanshanjia"))
 }
 
@@ -246,26 +246,24 @@ fn config_path() -> Result<PathBuf> {
 
 fn read_config(path: &Path) -> Result<Config> {
     let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read config file {}", path.display()))?;
-    toml::from_str(&contents)
-        .with_context(|| format!("failed to parse config file {}", path.display()))
+        .with_context(|| format!("读取配置文件 {} 失败", path.display()))?;
+    toml::from_str(&contents).with_context(|| format!("解析配置文件 {} 失败", path.display()))
 }
 
 fn ensure_config(path: &Path) -> Result<()> {
-    let parent = path.parent().context("config file path has no parent")?;
+    let parent = path.parent().context("配置文件路径没有父目录")?;
     fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+        .with_context(|| format!("创建配置目录 {} 失败", parent.display()))?;
 
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(()),
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to create config file {}", path.display()));
+            return Err(error).with_context(|| format!("创建配置文件 {} 失败", path.display()));
         }
     };
     file.write_all(DEFAULT_CONFIG.as_bytes())
-        .with_context(|| format!("failed to write default config to {}", path.display()))
+        .with_context(|| format!("写入默认配置到 {} 失败", path.display()))
 }
 
 fn edit_config() -> Result<()> {
@@ -275,17 +273,17 @@ fn edit_config() -> Result<()> {
 }
 
 fn open_editor(path: &Path) -> Result<()> {
-    let editor = env::var("EDITOR").context("EDITOR is not set; set it to your editor command")?;
-    let parts = shell_words::split(&editor).context("failed to parse EDITOR")?;
-    let (program, args) = parts.split_first().context("EDITOR cannot be empty")?;
+    let editor = env::var("EDITOR").context("EDITOR 未设置，请设置为你的编辑器命令")?;
+    let parts = shell_words::split(&editor).context("解析 EDITOR 失败")?;
+    let (program, args) = parts.split_first().context("EDITOR 不能为空")?;
     let status = Command::new(program)
         .args(args)
         .arg(path)
         .status()
-        .with_context(|| format!("failed to start EDITOR command `{editor}`"))?;
+        .with_context(|| format!("启动编辑器命令 `{editor}` 失败"))?;
 
     if !status.success() {
-        anyhow::bail!("EDITOR command exited with {status}");
+        anyhow::bail!("编辑器命令退出状态为 {status}");
     }
     Ok(())
 }
@@ -315,7 +313,7 @@ fn load_stored_token() -> Result<Option<String>> {
         credentials
     } else {
         let refreshed = oidc::refresh(&credentials)
-            .context("the stored session could not be refreshed; run `chuanshanjia login` again")?;
+            .context("本地登录会话无法续期，请重新执行 `chuanshanjia login`")?;
         oidc::store(&path, &refreshed)?;
         refreshed
     };
@@ -328,20 +326,20 @@ fn check_login_config(
     scope: Option<&str>,
     resource: &str,
 ) -> Result<()> {
-    ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
+    ensure!(!client_id.trim().is_empty(), "client_id 不能为空");
     if let Some(scope) = scope {
-        ensure!(!scope.trim().is_empty(), "scope must not be empty when set");
+        ensure!(!scope.trim().is_empty(), "设置 scope 时不能为空");
     }
-    let issuer_url = reqwest::Url::parse(issuer).context("invalid issuer")?;
+    let issuer_url = reqwest::Url::parse(issuer).context("issuer 无效")?;
     ensure!(
         matches!(issuer_url.scheme(), "http" | "https"),
-        "issuer must use http or https"
+        "issuer 必须使用 http 或 https"
     );
-    ensure!(!resource.trim().is_empty(), "resource must not be empty");
-    let resource_url = reqwest::Url::parse(resource).context("invalid resource")?;
+    ensure!(!resource.trim().is_empty(), "resource 不能为空");
+    let resource_url = reqwest::Url::parse(resource).context("resource 无效")?;
     ensure!(
         resource_url.fragment().is_none(),
-        "resource must not contain a fragment"
+        "resource 不能包含 fragment"
     );
     Ok(())
 }
@@ -352,11 +350,11 @@ fn login(args: LoginArgs) -> Result<()> {
     let issuer = args
         .issuer
         .or(config.issuer)
-        .context("set `issuer` in the config file or pass --issuer")?;
+        .context("请在配置文件中设置 `issuer`，或传入 --issuer")?;
     let client_id = args
         .client_id
         .or(config.client_id)
-        .context("set `client_id` in the config file or pass --client-id")?;
+        .context("请在配置文件中设置 `client_id`，或传入 --client-id")?;
     let scope = args
         .scope
         .or(config.scope.clone())
@@ -369,9 +367,9 @@ fn login(args: LoginArgs) -> Result<()> {
     let resource = args
         .resource
         .or(config.resource.clone())
-        .context("set `resource` in the config file or pass --resource")?;
+        .context("请在配置文件中设置 `resource`，或传入 --resource")?;
     check_login_config(&issuer, &client_id, Some(&scope), &resource)
-        .with_context(|| format!("login configuration check failed for {}", path.display()))?;
+        .with_context(|| format!("登录配置检查失败：{}", path.display()))?;
     let credentials = oidc::login(
         &issuer,
         &client_id,
@@ -383,7 +381,7 @@ fn login(args: LoginArgs) -> Result<()> {
     let path = credentials_path()?;
     oidc::store(&path, &credentials)?;
     emit(format!(
-        "Logged in to {issuer} as client {client_id}; tokens saved to {}",
+        "已登录 {issuer}（client {client_id}），token 保存在 {}",
         path.display()
     ));
     Ok(())
@@ -395,20 +393,17 @@ fn logout(args: LogoutArgs) -> Result<()> {
         && let Some(credentials) = oidc::load(&path)?
     {
         match oidc::revoke(&credentials) {
-            Ok(endpoint) => emit(format!("Revoked the session at {endpoint}")),
-            Err(error) => emit(format!(
-                "Warning: could not revoke the session ({error:#}); removing local credentials only"
-            )),
+            Ok(endpoint) => emit(format!("已吐销 {endpoint} 上的会话")),
+            Err(error) => emit(format!("警告：无法吐销会话（{error:#}），仅删除本地凭证")),
         }
     }
     match fs::remove_file(&path) {
-        Ok(()) => emit(format!("Removed {}", path.display())),
+        Ok(()) => emit(format!("已删除 {}", path.display())),
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            emit(format!("No stored session at {}", path.display()));
+            emit(format!("没有本地会话：{}", path.display()));
         }
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to remove credentials {}", path.display()));
+            return Err(error).with_context(|| format!("删除凭证 {} 失败", path.display()));
         }
     }
     Ok(())
@@ -418,11 +413,11 @@ fn backend_url(base_url: &str, path: &[&str]) -> Result<reqwest::Url> {
     let mut url = reqwest::Url::parse(base_url)?;
     ensure!(
         matches!(url.scheme(), "http" | "https"),
-        "base_url must use http or https"
+        "base_url 必须使用 http 或 https"
     );
     let mut segments = url
         .path_segments_mut()
-        .map_err(|_| anyhow::anyhow!("base_url cannot be used as a base URL"))?;
+        .map_err(|_| anyhow::anyhow!("base_url 不能作为基础 URL 使用"))?;
     segments.pop_if_empty();
     for segment in path {
         segments.push(segment);
@@ -443,7 +438,7 @@ fn http_client(url: &reqwest::Url) -> Result<reqwest::blocking::Client> {
     ) {
         client = client.no_proxy();
     }
-    client.build().context("failed to build HTTP client")
+    client.build().context("构建 HTTP 客户端失败")
 }
 
 fn print_json(body: &str) -> Result<()> {
@@ -463,14 +458,14 @@ fn http_get(url: &reqwest::Url, token: Option<String>, label: &str) -> Result<St
     };
     let response = request
         .send()
-        .with_context(|| format!("failed to GET {url}"))?;
+        .with_context(|| format!("GET 请求 {url} 失败"))?;
     let status = response.status();
     let body = response
         .text()
-        .with_context(|| format!("failed to read response from {url}"))?;
+        .with_context(|| format!("读取响应失败：{url}"))?;
     ensure!(
         status.is_success(),
-        "{label} request failed with {status}: {body}"
+        "{label} 请求失败，HTTP {status}：{body}"
     );
     Ok(body)
 }
@@ -485,11 +480,11 @@ fn is_uuid(value: &str) -> bool {
     }) && groups.next().is_none()
 }
 
-/// Map SELLER to the `/sellers` query: ASCII digits are a sellerId/storeId,
+/// Maps SELLER to the `/sellers` query: ASCII digits are a sellerId/storeId,
 /// a UUID is a leyanSellerId, and anything else is a sellerNick, which the
 /// backend only accepts together with a platform.
 fn seller_query(seller: &str, platform: Option<&str>) -> Result<Vec<(&'static str, String)>> {
-    ensure!(!seller.trim().is_empty(), "SELLER must not be empty");
+    ensure!(!seller.trim().is_empty(), "seller 参数不能为空");
     let key = if seller.chars().all(|c| c.is_ascii_digit()) {
         "seller_id"
     } else if is_uuid(seller) {
@@ -497,7 +492,7 @@ fn seller_query(seller: &str, platform: Option<&str>) -> Result<Vec<(&'static st
     } else {
         ensure!(
             platform.is_some_and(|platform| !platform.trim().is_empty()),
-            "SELLER {seller:?} is treated as a sellerNick; pass --platform to limit the platform"
+            "{seller:?} 会按 sellerNick 查询，请用 --platform 限定平台"
         );
         "seller_nick"
     };
@@ -513,7 +508,7 @@ fn services(args: ServicesArgs) -> Result<()> {
     let path = config_path()?;
     let config = read_config(&path)?;
     let url = backend_url(&config.base_url, &["services"])
-        .with_context(|| format!("invalid base_url in {}", path.display()))?;
+        .with_context(|| format!("配置文件 {} 中的 base_url 无效", path.display()))?;
     let token = resolve_token(args.token, &config)?;
     print_json(&http_get(&url, token, "services")?)
 }
@@ -523,19 +518,19 @@ fn sellers(args: SellersArgs) -> Result<()> {
     let path = config_path()?;
     let config = read_config(&path)?;
     let mut url = backend_url(&config.base_url, &["sellers"])
-        .with_context(|| format!("invalid base_url in {}", path.display()))?;
+        .with_context(|| format!("配置文件 {} 中的 base_url 无效", path.display()))?;
     let token = resolve_token(args.token, &config)?;
     url.query_pairs_mut().extend_pairs(params);
     print_json(&http_get(&url, token, "sellers")?)
 }
 
 fn search(args: SearchArgs) -> Result<()> {
-    ensure!(args.start.0 < args.end.0, "start must be earlier than end");
+    ensure!(args.start.0 < args.end.0, "start 必须早于 end");
 
     let path = config_path()?;
     let config = read_config(&path)?;
     let url = search_url(&config.base_url, &args.service)
-        .with_context(|| format!("invalid base_url in {}", path.display()))?;
+        .with_context(|| format!("配置文件 {} 中的 base_url 无效", path.display()))?;
     let token = resolve_token(args.token, &config)?;
     let filter = args
         .filter
@@ -559,14 +554,14 @@ fn search(args: SearchArgs) -> Result<()> {
     };
     let response = request
         .send()
-        .with_context(|| format!("failed to POST to {url}"))?;
+        .with_context(|| format!("POST 请求 {url} 失败"))?;
     let status = response.status();
     let body = response
         .text()
-        .with_context(|| format!("failed to read response from {url}"))?;
+        .with_context(|| format!("读取响应失败：{url}"))?;
     ensure!(
         status.is_success(),
-        "search request failed with {status}: {body}"
+        "search 请求失败，HTTP {status}：{body}"
     );
 
     print_json(&body)

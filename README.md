@@ -70,7 +70,7 @@ chuanshanjia services [--token JWT]
 chuanshanjia sellers <SELLER> [--platform PLATFORM] [--token JWT]
 ```
 
-请求 `GET /sellers`，成功时输出卖家 JSON 数组。`SELLER` 按形状自动识别：
+请求 `GET /sellers`，成功时输出卖家 JSON 数组，每项包含 `leyan_seller_id`、`platform`、`seller_id`、`seller_nick`、`store_title` 和 `enabled`（由服务端按 `organization_id,platform,seller_id` 排序）。`SELLER` 按形状自动识别：
 
 - 纯 ASCII 数字（sellerId 或 storeId）：发送 `seller_id=<SELLER>`；
 - UUID 形状（leyanSellerId）：发送 `leyan_seller_id=<SELLER>`；
