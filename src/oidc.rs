@@ -82,22 +82,21 @@ pub fn load(path: &Path) -> Result<Option<Credentials>> {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to read credentials {}", path.display()));
+            return Err(error).with_context(|| format!("读取凭证 {} 失败", path.display()));
         }
     };
-    let credentials = toml::from_str(&contents)
-        .with_context(|| format!("failed to parse credentials {}", path.display()))?;
+    let credentials =
+        toml::from_str(&contents).with_context(|| format!("解析凭证 {} 失败", path.display()))?;
     Ok(Some(credentials))
 }
 
 pub fn store(path: &Path, credentials: &Credentials) -> Result<()> {
-    let parent = path.parent().context("credentials path has no parent")?;
+    let parent = path.parent().context("凭证路径没有父目录")?;
     fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create config directory {}", parent.display()))?;
-    let contents = toml::to_string(credentials).context("failed to serialize credentials")?;
+        .with_context(|| format!("创建配置目录 {} 失败", parent.display()))?;
+    let contents = toml::to_string(credentials).context("序列化凭证失败")?;
     write_private(path, contents.as_bytes())
-        .with_context(|| format!("failed to write credentials {}", path.display()))
+        .with_context(|| format!("写入凭证 {} 失败", path.display()))
 }
 
 #[cfg(unix)]
@@ -124,31 +123,29 @@ pub(crate) fn client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
-        .context("failed to build HTTP client")
+        .context("构建 HTTP 客户端失败")
 }
 
 fn discover(http: &reqwest::blocking::Client, issuer: &str) -> Result<(Discovery, Url)> {
     let issuer = issuer.trim_end_matches('/').to_owned();
-    let url = Url::parse(&issuer).with_context(|| format!("invalid issuer {issuer:?}"))?;
+    let url = Url::parse(&issuer).with_context(|| format!("issuer 无效：{issuer:?}"))?;
     ensure!(
         matches!(url.scheme(), "http" | "https"),
-        "issuer must use http or https"
+        "issuer 必须使用 http 或 https"
     );
     let document_url = Url::parse(&format!("{issuer}/.well-known/openid-configuration"))?;
     let response = http
         .get(document_url.clone())
         .send()
-        .with_context(|| format!("failed to GET {document_url}"))?;
+        .with_context(|| format!("GET 请求 {document_url} 失败"))?;
     let status = response.status();
-    let body = response
-        .text()
-        .context("failed to read the discovery response")?;
+    let body = response.text().context("读取 OIDC discovery 响应失败")?;
     ensure!(
         status.is_success(),
-        "GET {document_url} returned {status}: {body}"
+        "GET {document_url} 返回 {status}：{body}"
     );
     let discovery: Discovery = serde_json::from_str(&body)
-        .with_context(|| format!("invalid discovery document at {document_url}"))?;
+        .with_context(|| format!("OIDC discovery 文档无效：{document_url}"))?;
 
     Ok((discovery, Url::parse(&issuer)?))
 }
@@ -166,30 +163,30 @@ pub fn login(
     let (discovery, issuer_url) = discover(&http, issuer)?;
     let issuer = issuer_url.as_str().trim_end_matches('/').to_owned();
 
-    let redirect = Url::parse(redirect_uri)
-        .with_context(|| format!("invalid redirect URI {redirect_uri:?}"))?;
+    let redirect =
+        Url::parse(redirect_uri).with_context(|| format!("redirect URI 无效：{redirect_uri:?}"))?;
     ensure!(
         redirect.scheme() == "http",
-        "redirect URI must use http on the loopback interface"
+        "redirect URI 必须是 loopback 上的 http 地址"
     );
     ensure!(
         matches!(
             redirect.host_str(),
             Some("127.0.0.1" | "localhost" | "[::1]" | "::1")
         ),
-        "redirect URI host must be a loopback address"
+        "redirect URI 的主机必须是 loopback 地址"
     );
     let requested_port = redirect.port_or_known_default().unwrap_or(80);
     let listener = TcpListener::bind(("127.0.0.1", requested_port)).with_context(|| {
         format!(
-            "failed to listen on 127.0.0.1:{requested_port} for the login callback; \
-             the IdP matches the redirect URI exactly, so register and pass one with a free unprivileged port"
+            "无法在 127.0.0.1:{requested_port} 监听登录回调；\
+             IdP 会精确匹配 redirect URI，请注册并传入一个空闲的非特权端口"
         )
     })?;
     // Port 0 asks the OS for a free port; the redirect URI must then carry it.
     let bound_port = listener
         .local_addr()
-        .context("failed to read the loopback callback address")?
+        .context("读取 loopback 回调地址失败")?
         .port();
     let redirect_uri = if bound_port == requested_port {
         redirect_uri.to_owned()
@@ -197,7 +194,7 @@ pub fn login(
         let mut redirect = redirect;
         redirect
             .set_port(Some(bound_port))
-            .map_err(|_| anyhow::anyhow!("invalid redirect URI {redirect_uri:?}"))?;
+            .map_err(|_| anyhow::anyhow!("redirect URI 无效：{redirect_uri:?}"))?;
         redirect.to_string()
     };
     let redirect_uri = redirect_uri.as_str();
@@ -207,7 +204,7 @@ pub fn login(
     let state: String = URL_SAFE_NO_PAD.encode(random::<[u8; 16]>());
 
     let mut authorize = Url::parse(&discovery.authorization_endpoint)
-        .context("invalid authorization_endpoint in discovery document")?;
+        .context("discovery 文档中的 authorization_endpoint 无效")?;
     authorize
         .query_pairs_mut()
         .append_pair("response_type", "code")
@@ -233,10 +230,10 @@ pub fn login(
             .append_pair("resource", resource);
     }
 
-    crate::emit("Open this URL in a browser to log in:");
+    crate::emit("请在浏览器中打开以下地址完成登录：");
     crate::emit(&authorize);
     if open && !open_browser(authorize.as_str()) {
-        crate::emit("Could not open a browser automatically; open the URL above manually.");
+        crate::emit("无法自动打开浏览器，请手动打开上面的地址。");
     }
 
     let code = wait_for_code(&listener, &state)?;
@@ -261,7 +258,7 @@ pub fn refresh(credentials: &Credentials) -> Result<Credentials> {
     let refresh_token = credentials
         .refresh_token
         .as_deref()
-        .context("no refresh token; run `chuanshanjia login` again")?;
+        .context("没有 refresh token，请重新执行 `chuanshanjia login`")?;
     let tokens = post_token(
         &client()?,
         &credentials.token_endpoint,
@@ -285,7 +282,7 @@ pub fn refresh(credentials: &Credentials) -> Result<Credentials> {
 pub fn bearer_token(credentials: &Credentials) -> Result<&str> {
     ensure!(
         is_jwt(&credentials.access_token),
-        "the identity provider must return a JWT access token; opaque access tokens are not supported"
+        "IdP 必须返回 JWT 形式的 access token，不支持不透明 access token"
     );
     Ok(&credentials.access_token)
 }
@@ -310,7 +307,7 @@ pub fn revoke(credentials: &Credentials) -> Result<String> {
             let (discovery, _) = discover(&client()?, &credentials.issuer)?;
             discovery
                 .revocation_endpoint
-                .context("the identity provider exposes no revocation endpoint")?
+                .context("IdP 没有提供 revocation endpoint")?
         }
     };
     // Revoking the refresh token cascades to its access tokens per RFC 7009 §2.1.
@@ -327,11 +324,11 @@ pub fn revoke(credentials: &Credentials) -> Result<String> {
             ("client_id", credentials.client_id.as_str()),
         ])
         .send()
-        .with_context(|| format!("failed to POST to {endpoint}"))?;
+        .with_context(|| format!("POST 请求 {endpoint} 失败"))?;
     let status = response.status();
     ensure!(
         status.is_success(),
-        "revocation at {endpoint} returned {status}"
+        "在 {endpoint} 吊销会话失败，返回 {status}"
     );
     Ok(endpoint)
 }
@@ -414,28 +411,26 @@ fn post_token(
         .post(token_endpoint)
         .form(form)
         .send()
-        .with_context(|| format!("failed to POST to {token_endpoint}"))?;
+        .with_context(|| format!("POST 请求 {token_endpoint} 失败"))?;
     let status = response.status();
-    let body = response
-        .text()
-        .context("failed to read the token response")?;
+    let body = response.text().context("读取 token 响应失败")?;
     if !status.is_success() {
         let detail = match serde_json::from_str::<OAuthError>(&body) {
             Ok(error) => match error.error_description {
-                Some(description) => format!("{}: {description}", error.error),
+                Some(description) => format!("{}：{description}", error.error),
                 None => error.error,
             },
             Err(_) => body.clone(),
         };
         return Err(anyhow::anyhow!(
-            "token request to {token_endpoint} failed with {status}: {detail}"
+            "向 {token_endpoint} 请求 token 失败，返回 {status}：{detail}"
         ));
     }
-    let tokens: TokenResponse = serde_json::from_str(&body)
-        .with_context(|| format!("invalid token response from {token_endpoint}"))?;
+    let tokens: TokenResponse =
+        serde_json::from_str(&body).with_context(|| format!("token 响应无效：{token_endpoint}"))?;
     ensure!(
         !tokens.access_token.is_empty(),
-        "token response from {token_endpoint} has an empty access_token"
+        "{token_endpoint} 的 token 响应中 access_token 为空"
     );
     Ok(tokens)
 }
@@ -444,18 +439,18 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String>
     let deadline = std::time::Instant::now() + CALLBACK_TIMEOUT;
     listener
         .set_nonblocking(true)
-        .context("failed to configure the loopback listener")?;
+        .context("配置 loopback 监听失败")?;
     loop {
         match listener.accept() {
             Ok((stream, _)) => return handle_callback(stream, expected_state),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 ensure!(
                     std::time::Instant::now() < deadline,
-                    "timed out waiting for the browser callback; run `chuanshanjia login` again"
+                    "等待浏览器回调超时，请重新执行 `chuanshanjia login`"
                 );
                 thread::sleep(Duration::from_millis(100));
             }
-            Err(error) => return Err(error).context("failed to accept the browser callback"),
+            Err(error) => return Err(error).context("接收浏览器回调失败"),
         }
     }
 }
@@ -463,7 +458,7 @@ fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String>
 fn handle_callback(mut stream: TcpStream, expected_state: &str) -> Result<String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
-        .context("failed to configure the callback connection")?;
+        .context("配置回调连接失败")?;
     let mut buffer = [0u8; 8192];
     let read = stream.read(&mut buffer).unwrap_or(0);
     let request = String::from_utf8_lossy(&buffer[..read]);
@@ -471,9 +466,9 @@ fn handle_callback(mut stream: TcpStream, expected_state: &str) -> Result<String
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
-        .context("the browser sent an unexpected request")?;
+        .context("浏览器发来的请求无法识别")?;
     let url = Url::parse(&format!("http://127.0.0.1{target}"))
-        .context("the browser sent an unexpected callback URL")?;
+        .context("浏览器发来的回调 URL 无法识别")?;
     let parameters = url
         .query_pairs()
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
@@ -481,10 +476,7 @@ fn handle_callback(mut stream: TcpStream, expected_state: &str) -> Result<String
 
     let result = classify_callback(&parameters, expected_state);
     let (status, message) = match &result {
-        Ok(_) => (
-            "200 OK",
-            "Login complete. You can close this window and return to the terminal.".to_owned(),
-        ),
+        Ok(_) => ("200 OK", "登录完成，可以关闭此窗口并回到终端。".to_owned()),
         Err(error) => ("400 Bad Request", error.to_string()),
     };
     let body = format!(
@@ -509,21 +501,16 @@ fn classify_callback(
         let description = parameters
             .get("error_description")
             .map(String::as_str)
-            .unwrap_or("no description");
-        anyhow::bail!("the identity provider rejected the login: {error} ({description})");
+            .unwrap_or("无描述");
+        anyhow::bail!("IdP 拒绝了登录：{error}（{description}）");
     }
-    let state = parameters
-        .get("state")
-        .context("the callback is missing the state parameter")?;
-    ensure!(
-        state == expected_state,
-        "the callback state does not match this login attempt"
-    );
+    let state = parameters.get("state").context("回调缺少 state 参数")?;
+    ensure!(state == expected_state, "回调 state 与本次登录不匹配");
     parameters
         .get("code")
         .filter(|code| !code.is_empty())
         .cloned()
-        .context("the callback is missing the authorization code")
+        .context("回调缺少 authorization code")
 }
 
 fn open_browser(url: &str) -> bool {

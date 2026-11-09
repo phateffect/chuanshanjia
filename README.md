@@ -54,7 +54,7 @@ client_id = "chuanshanjia"
 resource = "https://logs.example.com"
 ```
 
-`base_url` 可以包含路径前缀，CLI 会在其后追加 `/services` 或 `/{service}/_search`。`config` 不会覆盖已有文件；`EDITOR` 支持带参数的命令。
+`base_url` 可以包含路径前缀，CLI 会在其后追加 `/services`、`/sellers` 或 `/{service}/_search`。`config` 不会覆盖已有文件；`EDITOR` 支持带参数的命令。
 
 ## 列出服务
 
@@ -63,6 +63,20 @@ chuanshanjia services [--token JWT]
 ```
 
 请求 `GET /services`，成功时输出按名称排序的服务 JSON 数组，每项包含 `name` 和 `description`。
+
+## 查询卖家
+
+```sh
+chuanshanjia sellers <SELLER> [--platform PLATFORM] [--token JWT]
+```
+
+请求 `GET /sellers`，成功时输出卖家 JSON 数组，每项包含 `leyan_seller_id`、`platform`、`seller_id`、`seller_nick`、`store_title` 和 `enabled`（由服务端按 `organization_id,platform,seller_id` 排序）。`SELLER` 按形状自动识别：
+
+- 纯 ASCII 数字（sellerId 或 storeId）：发送 `seller_id=<SELLER>`；
+- UUID 形状（leyanSellerId）：发送 `leyan_seller_id=<SELLER>`；
+- 其他（sellerNick）：发送 `seller_nick=<SELLER>`，此时 `--platform` 必填，服务端只接受 sellerNick 与 platform 一起查询。
+
+`--platform PLATFORM` 会额外发送 `platform=<PLATFORM>`，因此也可以和 sellerId 或 leyanSellerId 组合，把结果限定在某个平台。
 
 ## 查询日志
 
@@ -78,6 +92,7 @@ chuanshanjia search foo \
 
 ```text
 chuanshanjia services [--token JWT]
+chuanshanjia sellers <SELLER> [--platform PLATFORM] [--token JWT]
 chuanshanjia search <SERVICE> [-f KEY=VALUE]... [-k KEYWORDS] [--token JWT] [--start TIME] [--end TIME]
 chuanshanjia login [--issuer URL] [--client-id ID] [--redirect-uri URI] [--resource URI] [--scope SCOPES] [--no-browser]
 chuanshanjia logout [--local]
@@ -91,7 +106,7 @@ chuanshanjia config
 - 外部服务可配置预置 filter 和 keyword；这些服务端条件是否优先由服务端契约决定，CLI 不在本地合并。
 - 查询结果的具体匹配、分页、排序和字段清洗规则由外部服务及其 provider 决定。
 
-`services` 和 `search` 成功时输出格式化 JSON；服务返回非 2xx 时，CLI 输出状态码与响应体并以非零状态退出。输出写 stdout，`| head` 这类提前关闭管道的情况不会 panic。
+`services`、`sellers` 和 `search` 成功时输出格式化 JSON；服务返回非 2xx 时，CLI 输出状态码与响应体并以非零状态退出。输出写 stdout，`| head` 这类提前关闭管道的情况不会 panic。
 
 ### 时间语义
 
@@ -126,15 +141,16 @@ chuanshanjia logout --local        # 只删除本地 token
 
 token 保存在 `~/.config/chuanshanjia/credentials.toml`，Unix 下权限为 `0600`，不与手写的 `config.toml` 混合。
 
-`services` 和 `search` 的 token 优先级为 `--token` > 本地登录会话 > 配置文件 `token`。会话进入过期窗口时先用 refresh token 静默续期并回写文件，续期失败则提示重新 `login`。过期时间优先使用 IdP 返回的 `expires_in`；授权码兑换未返回该字段时，退回按 access token 的 JWT `exp` 判断。
+`services`、`sellers` 和 `search` 的 token 优先级为 `--token` > 本地登录会话 > 配置文件 `token`。会话进入过期窗口时先用 refresh token 静默续期并回写文件，续期失败则提示重新 `login`。过期时间优先使用 IdP 返回的 `expires_in`；授权码兑换未返回该字段时，退回按 access token 的 JWT `exp` 判断。
 
 `logout` 默认先按 RFC 7009 使用 refresh token 调 IdP 的 revocation endpoint，再删除本地凭证。IdP 不可达时只打印警告，仍删除本地文件，保证离线也能登出。
 
 ## 外部 HTTP 服务
 
-CLI 依赖两个受 Bearer token 保护的服务端接口：
+CLI 依赖三个受 Bearer token 保护的服务端接口：
 
 - `GET /services`：列出服务名称与说明；
+- `GET /sellers`：按 sellerNick、sellerId/storeId 或 leyanSellerId 查卖家，可用 `platform` 限定平台；
 - `POST /{service}/_search`：发送平铺的 `filter`、`keywords`、`start`、`end` 和 Bearer token，接收 JSON 响应。
 
 原 Rust 服务端已经移出本仓库。Python 重实现所需的完整请求、响应、认证、provider 和错误契约见 [docs/backend-migration.md](docs/backend-migration.md)。

@@ -31,7 +31,7 @@ const DEFAULT_REDIRECT_URI: &str = "http://127.0.0.1:0/callback";
 const DEFAULT_SCOPE: &str = "openid offline_access";
 const DEFAULT_CONFIG: &str = "base_url = \"\"\n# token = \"\"\n# issuer = \"https://oidc.example.com\"\n# client_id = \"chuanshanjia\"\nresource = \"\"\nscope = \"openid offline_access\"\n";
 
-/// Search logs through a chuanshanjia backend.
+/// 通过 chuanshanjia 后端查询日志。
 #[derive(Cli)]
 #[usage(bin = "chuanshanjia", version = "0.1.0", arg_required_else_help)]
 struct Chuanshanjia {
@@ -41,56 +41,72 @@ struct Chuanshanjia {
 
 #[derive(Subcommands)]
 enum Commands {
-    /// List services supported by the backend.
+    /// 列出后端支持的 service。
     Services(ServicesArgs),
-    /// Search a configured backend service.
+    /// 按 sellerNick、sellerId、storeId 或 leyanSellerId 查卖家。
+    Sellers(SellersArgs),
+    /// 查询指定的后端 service。
     Search(SearchArgs),
-    /// Log in through the OIDC issuer and store the tokens.
+    /// 通过 OIDC issuer 登录并保存 token。
     Login(LoginArgs),
-    /// Log out: revoke the tokens at the IdP and remove them locally.
+    /// 登出：在 IdP 吐销 token 并删除本地凭证。
     Logout(LogoutArgs),
-    /// Create the config file if needed and open it with EDITOR.
+    /// 按需创建配置文件并用 EDITOR 打开。
     Config,
 }
 
 #[derive(Args)]
 struct ServicesArgs {
-    /// Bearer JWT; overrides token from the config file.
+    /// Bearer JWT；覆盖配置文件中的 token。
+    #[usage(long)]
+    token: Option<String>,
+}
+
+#[derive(Args)]
+struct SellersArgs {
+    /// sellerNick、sellerId、storeId 或 leyanSellerId。
+    seller: String,
+
+    /// 限定平台；sellerNick 必填。
+    #[usage(long)]
+    platform: Option<String>,
+
+    /// Bearer JWT；覆盖配置文件中的 token。
     #[usage(long)]
     token: Option<String>,
 }
 
 #[derive(Args)]
 struct LogoutArgs {
-    /// Only delete the local credentials; keep the session valid at the IdP.
+    /// 只删除本地凭证，保留 IdP 上的会话。
     #[usage(long)]
     local: bool,
 }
 
 #[derive(Args)]
 struct LoginArgs {
-    /// OIDC issuer; defaults to `issuer` in the config file.
+    /// OIDC issuer；默认取配置文件中的 `issuer`。
     #[usage(long)]
     issuer: Option<String>,
 
-    /// OIDC client id; defaults to `client_id` in the config file.
+    /// OIDC client id；默认取配置文件中的 `client_id`。
     #[usage(long)]
     client_id: Option<String>,
 
-    /// Loopback redirect URI; must match the client registration exactly.
+    /// Loopback redirect URI；必须与客户端注册完全一致。
     #[usage(long)]
     redirect_uri: Option<String>,
 
-    /// Scopes to request; defaults to `scope` in the config, then
-    /// `openid offline_access`. Business scopes come from the IdP via `resource`.
+    /// 请求的 scope；默认取配置文件中的 `scope`，再退回
+    /// `openid offline_access`。业务 scope 由 IdP 按 `resource` 授予。
     #[usage(long)]
     scope: Option<String>,
 
-    /// Resource the token is for (RFC 8707); required unless set in the config.
+    /// token 对应的 resource（RFC 8707）；配置文件中未设置时必填。
     #[usage(long)]
     resource: Option<String>,
 
-    /// Print the authorization URL instead of opening a browser.
+    /// 只打印授权 URL，不打开浏览器。
     #[usage(long)]
     no_browser: bool,
 }
@@ -98,27 +114,27 @@ struct LoginArgs {
 #[derive(Args)]
 #[usage(group("query", required, multiple), args_override_self = false)]
 struct SearchArgs {
-    /// Name of the configured search service.
+    /// 要查询的 service 名称。
     service: String,
 
-    /// Exact-match filter in KEY=VALUE form; may be repeated.
+    /// KEY=VALUE 形式的等值过滤条件；可重复。
     #[usage(short = 'f', long, group = "query", value_name = "KEY=VALUE")]
     filter: Vec<Filter>,
 
-    /// Full-text keywords; may be supplied at most once.
+    /// 全文关键词；最多出现一次。
     #[usage(short = 'k', long, group = "query")]
     keywords: Option<String>,
 
-    /// Bearer JWT; overrides token from the config file.
+    /// Bearer JWT；覆盖配置文件中的 token。
     #[usage(long)]
     token: Option<String>,
 
-    /// Start time: ISO 8601 with timezone, local (+08:00) datetime, or epoch seconds.
-    #[usage(long, default_fn = default_start, default_note = "today at 00:00:00 +08:00")]
+    /// 开始时间：带时区的 ISO 8601、本地（+08:00）时间或 epoch 秒。
+    #[usage(long, default_fn = default_start, default_note = "今天 00:00:00 +08:00")]
     start: Timestamp,
 
-    /// End time: ISO 8601 with timezone, local (+08:00) datetime, or epoch seconds.
-    #[usage(long, default_fn = default_end, default_note = "now")]
+    /// 结束时间：带时区的 ISO 8601、本地（+08:00）时间或 epoch 秒。
+    #[usage(long, default_fn = default_end, default_note = "当前时间")]
     end: Timestamp,
 }
 
@@ -150,7 +166,7 @@ impl FromStr for Timestamp {
         }
 
         Err(format!(
-            "invalid timestamp {value:?}; expected ISO 8601 with timezone, YYYY-MM-DD HH:mm:ss (+08:00), or epoch seconds"
+            "时间格式无效：{value:?}；请使用带时区的 ISO 8601、YYYY-MM-DD HH:mm:ss（+08:00）或 epoch 秒"
         ))
     }
 }
@@ -167,7 +183,7 @@ impl FromStr for Filter {
         let (key, value) = value
             .split_once('=')
             .filter(|(key, _)| !key.is_empty())
-            .ok_or_else(|| "filter must use KEY=VALUE with a non-empty key".to_owned())?;
+            .ok_or_else(|| "filter 必须写成 KEY=VALUE，且 key 不能为空".to_owned())?;
         Ok(Self {
             key: key.to_owned(),
             value: value.to_owned(),
@@ -220,7 +236,7 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn config_dir() -> Result<PathBuf> {
-    let home = home_dir().context("could not determine the user home directory")?;
+    let home = home_dir().context("无法确定用户主目录")?;
     Ok(home.join(".config").join("chuanshanjia"))
 }
 
@@ -230,26 +246,24 @@ fn config_path() -> Result<PathBuf> {
 
 fn read_config(path: &Path) -> Result<Config> {
     let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read config file {}", path.display()))?;
-    toml::from_str(&contents)
-        .with_context(|| format!("failed to parse config file {}", path.display()))
+        .with_context(|| format!("读取配置文件 {} 失败", path.display()))?;
+    toml::from_str(&contents).with_context(|| format!("解析配置文件 {} 失败", path.display()))
 }
 
 fn ensure_config(path: &Path) -> Result<()> {
-    let parent = path.parent().context("config file path has no parent")?;
+    let parent = path.parent().context("配置文件路径没有父目录")?;
     fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+        .with_context(|| format!("创建配置目录 {} 失败", parent.display()))?;
 
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(()),
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to create config file {}", path.display()));
+            return Err(error).with_context(|| format!("创建配置文件 {} 失败", path.display()));
         }
     };
     file.write_all(DEFAULT_CONFIG.as_bytes())
-        .with_context(|| format!("failed to write default config to {}", path.display()))
+        .with_context(|| format!("写入默认配置到 {} 失败", path.display()))
 }
 
 fn edit_config() -> Result<()> {
@@ -259,17 +273,17 @@ fn edit_config() -> Result<()> {
 }
 
 fn open_editor(path: &Path) -> Result<()> {
-    let editor = env::var("EDITOR").context("EDITOR is not set; set it to your editor command")?;
-    let parts = shell_words::split(&editor).context("failed to parse EDITOR")?;
-    let (program, args) = parts.split_first().context("EDITOR cannot be empty")?;
+    let editor = env::var("EDITOR").context("EDITOR 未设置，请设置为你的编辑器命令")?;
+    let parts = shell_words::split(&editor).context("解析 EDITOR 失败")?;
+    let (program, args) = parts.split_first().context("EDITOR 不能为空")?;
     let status = Command::new(program)
         .args(args)
         .arg(path)
         .status()
-        .with_context(|| format!("failed to start EDITOR command `{editor}`"))?;
+        .with_context(|| format!("启动编辑器命令 `{editor}` 失败"))?;
 
     if !status.success() {
-        anyhow::bail!("EDITOR command exited with {status}");
+        anyhow::bail!("编辑器命令退出状态为 {status}");
     }
     Ok(())
 }
@@ -299,7 +313,7 @@ fn load_stored_token() -> Result<Option<String>> {
         credentials
     } else {
         let refreshed = oidc::refresh(&credentials)
-            .context("the stored session could not be refreshed; run `chuanshanjia login` again")?;
+            .context("本地登录会话无法续期，请重新执行 `chuanshanjia login`")?;
         oidc::store(&path, &refreshed)?;
         refreshed
     };
@@ -312,20 +326,20 @@ fn check_login_config(
     scope: Option<&str>,
     resource: &str,
 ) -> Result<()> {
-    ensure!(!client_id.trim().is_empty(), "client_id must not be empty");
+    ensure!(!client_id.trim().is_empty(), "client_id 不能为空");
     if let Some(scope) = scope {
-        ensure!(!scope.trim().is_empty(), "scope must not be empty when set");
+        ensure!(!scope.trim().is_empty(), "设置 scope 时不能为空");
     }
-    let issuer_url = reqwest::Url::parse(issuer).context("invalid issuer")?;
+    let issuer_url = reqwest::Url::parse(issuer).context("issuer 无效")?;
     ensure!(
         matches!(issuer_url.scheme(), "http" | "https"),
-        "issuer must use http or https"
+        "issuer 必须使用 http 或 https"
     );
-    ensure!(!resource.trim().is_empty(), "resource must not be empty");
-    let resource_url = reqwest::Url::parse(resource).context("invalid resource")?;
+    ensure!(!resource.trim().is_empty(), "resource 不能为空");
+    let resource_url = reqwest::Url::parse(resource).context("resource 无效")?;
     ensure!(
         resource_url.fragment().is_none(),
-        "resource must not contain a fragment"
+        "resource 不能包含 fragment"
     );
     Ok(())
 }
@@ -336,11 +350,11 @@ fn login(args: LoginArgs) -> Result<()> {
     let issuer = args
         .issuer
         .or(config.issuer)
-        .context("set `issuer` in the config file or pass --issuer")?;
+        .context("请在配置文件中设置 `issuer`，或传入 --issuer")?;
     let client_id = args
         .client_id
         .or(config.client_id)
-        .context("set `client_id` in the config file or pass --client-id")?;
+        .context("请在配置文件中设置 `client_id`，或传入 --client-id")?;
     let scope = args
         .scope
         .or(config.scope.clone())
@@ -353,9 +367,9 @@ fn login(args: LoginArgs) -> Result<()> {
     let resource = args
         .resource
         .or(config.resource.clone())
-        .context("set `resource` in the config file or pass --resource")?;
+        .context("请在配置文件中设置 `resource`，或传入 --resource")?;
     check_login_config(&issuer, &client_id, Some(&scope), &resource)
-        .with_context(|| format!("login configuration check failed for {}", path.display()))?;
+        .with_context(|| format!("登录配置检查失败：{}", path.display()))?;
     let credentials = oidc::login(
         &issuer,
         &client_id,
@@ -367,7 +381,7 @@ fn login(args: LoginArgs) -> Result<()> {
     let path = credentials_path()?;
     oidc::store(&path, &credentials)?;
     emit(format!(
-        "Logged in to {issuer} as client {client_id}; tokens saved to {}",
+        "已登录 {issuer}（client {client_id}），token 保存在 {}",
         path.display()
     ));
     Ok(())
@@ -379,20 +393,17 @@ fn logout(args: LogoutArgs) -> Result<()> {
         && let Some(credentials) = oidc::load(&path)?
     {
         match oidc::revoke(&credentials) {
-            Ok(endpoint) => emit(format!("Revoked the session at {endpoint}")),
-            Err(error) => emit(format!(
-                "Warning: could not revoke the session ({error:#}); removing local credentials only"
-            )),
+            Ok(endpoint) => emit(format!("已吐销 {endpoint} 上的会话")),
+            Err(error) => emit(format!("警告：无法吐销会话（{error:#}），仅删除本地凭证")),
         }
     }
     match fs::remove_file(&path) {
-        Ok(()) => emit(format!("Removed {}", path.display())),
+        Ok(()) => emit(format!("已删除 {}", path.display())),
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            emit(format!("No stored session at {}", path.display()));
+            emit(format!("没有本地会话：{}", path.display()));
         }
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to remove credentials {}", path.display()));
+            return Err(error).with_context(|| format!("删除凭证 {} 失败", path.display()));
         }
     }
     Ok(())
@@ -402,11 +413,11 @@ fn backend_url(base_url: &str, path: &[&str]) -> Result<reqwest::Url> {
     let mut url = reqwest::Url::parse(base_url)?;
     ensure!(
         matches!(url.scheme(), "http" | "https"),
-        "base_url must use http or https"
+        "base_url 必须使用 http 或 https"
     );
     let mut segments = url
         .path_segments_mut()
-        .map_err(|_| anyhow::anyhow!("base_url cannot be used as a base URL"))?;
+        .map_err(|_| anyhow::anyhow!("base_url 不能作为基础 URL 使用"))?;
     segments.pop_if_empty();
     for segment in path {
         segments.push(segment);
@@ -419,13 +430,7 @@ fn search_url(base_url: &str, service: &str) -> Result<reqwest::Url> {
     backend_url(base_url, &[service, "_search"])
 }
 
-fn services(args: ServicesArgs) -> Result<()> {
-    let path = config_path()?;
-    let config = read_config(&path)?;
-    let url = backend_url(&config.base_url, &["services"])
-        .with_context(|| format!("invalid base_url in {}", path.display()))?;
-    let token = resolve_token(args.token, &config)?;
-
+fn http_client(url: &reqwest::Url) -> Result<reqwest::blocking::Client> {
     let mut client = reqwest::blocking::Client::builder();
     if matches!(
         url.host_str(),
@@ -433,7 +438,19 @@ fn services(args: ServicesArgs) -> Result<()> {
     ) {
         client = client.no_proxy();
     }
-    let client = client.build().context("failed to build HTTP client")?;
+    client.build().context("构建 HTTP 客户端失败")
+}
+
+fn print_json(body: &str) -> Result<()> {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(body) => emit(serde_json::to_string_pretty(&body)?),
+        Err(_) => emit(body),
+    }
+    Ok(())
+}
+
+fn http_get(url: &reqwest::Url, token: Option<String>, label: &str) -> Result<String> {
+    let client = http_client(url)?;
     let request = client.get(url.clone());
     let request = match token {
         Some(token) => request.bearer_auth(token),
@@ -441,30 +458,79 @@ fn services(args: ServicesArgs) -> Result<()> {
     };
     let response = request
         .send()
-        .with_context(|| format!("failed to GET {url}"))?;
+        .with_context(|| format!("GET 请求 {url} 失败"))?;
     let status = response.status();
     let body = response
         .text()
-        .with_context(|| format!("failed to read response from {url}"))?;
+        .with_context(|| format!("读取响应失败：{url}"))?;
     ensure!(
         status.is_success(),
-        "services request failed with {status}: {body}"
+        "{label} 请求失败，HTTP {status}：{body}"
     );
+    Ok(body)
+}
 
-    match serde_json::from_str::<serde_json::Value>(&body) {
-        Ok(body) => emit(serde_json::to_string_pretty(&body)?),
-        Err(_) => emit(body),
+/// leyanSellerId is a canonical UUID; only its shape matters here.
+fn is_uuid(value: &str) -> bool {
+    let mut groups = value.split('-');
+    [8, 4, 4, 4, 12].iter().all(|&width| {
+        groups.next().is_some_and(|group| {
+            group.len() == width && group.chars().all(|c| c.is_ascii_hexdigit())
+        })
+    }) && groups.next().is_none()
+}
+
+/// Maps SELLER to the `/sellers` query: ASCII digits are a sellerId/storeId,
+/// a UUID is a leyanSellerId, and anything else is a sellerNick, which the
+/// backend only accepts together with a platform.
+fn seller_query(seller: &str, platform: Option<&str>) -> Result<Vec<(&'static str, String)>> {
+    ensure!(!seller.trim().is_empty(), "seller 参数不能为空");
+    let key = if seller.chars().all(|c| c.is_ascii_digit()) {
+        "seller_id"
+    } else if is_uuid(seller) {
+        "leyan_seller_id"
+    } else {
+        ensure!(
+            platform.is_some_and(|platform| !platform.trim().is_empty()),
+            "{seller:?} 会按 sellerNick 查询，请用 --platform 限定平台"
+        );
+        "seller_nick"
+    };
+    let mut params = Vec::new();
+    if let Some(platform) = platform.filter(|platform| !platform.trim().is_empty()) {
+        params.push(("platform", platform.to_owned()));
     }
-    Ok(())
+    params.push((key, seller.to_owned()));
+    Ok(params)
+}
+
+fn services(args: ServicesArgs) -> Result<()> {
+    let path = config_path()?;
+    let config = read_config(&path)?;
+    let url = backend_url(&config.base_url, &["services"])
+        .with_context(|| format!("配置文件 {} 中的 base_url 无效", path.display()))?;
+    let token = resolve_token(args.token, &config)?;
+    print_json(&http_get(&url, token, "services")?)
+}
+
+fn sellers(args: SellersArgs) -> Result<()> {
+    let params = seller_query(&args.seller, args.platform.as_deref())?;
+    let path = config_path()?;
+    let config = read_config(&path)?;
+    let mut url = backend_url(&config.base_url, &["sellers"])
+        .with_context(|| format!("配置文件 {} 中的 base_url 无效", path.display()))?;
+    let token = resolve_token(args.token, &config)?;
+    url.query_pairs_mut().extend_pairs(params);
+    print_json(&http_get(&url, token, "sellers")?)
 }
 
 fn search(args: SearchArgs) -> Result<()> {
-    ensure!(args.start.0 < args.end.0, "start must be earlier than end");
+    ensure!(args.start.0 < args.end.0, "start 必须早于 end");
 
     let path = config_path()?;
     let config = read_config(&path)?;
     let url = search_url(&config.base_url, &args.service)
-        .with_context(|| format!("invalid base_url in {}", path.display()))?;
+        .with_context(|| format!("配置文件 {} 中的 base_url 无效", path.display()))?;
     let token = resolve_token(args.token, &config)?;
     let filter = args
         .filter
@@ -480,14 +546,7 @@ fn search(args: SearchArgs) -> Result<()> {
     body.insert("end".to_owned(), args.end.0.into());
     let body = serde_json::Value::Object(body);
 
-    let mut client = reqwest::blocking::Client::builder();
-    if matches!(
-        url.host_str(),
-        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
-    ) {
-        client = client.no_proxy();
-    }
-    let client = client.build().context("failed to build HTTP client")?;
+    let client = http_client(&url)?;
     let request = client.post(url.clone()).json(&body);
     let request = match token {
         Some(token) => request.bearer_auth(token),
@@ -495,26 +554,23 @@ fn search(args: SearchArgs) -> Result<()> {
     };
     let response = request
         .send()
-        .with_context(|| format!("failed to POST to {url}"))?;
+        .with_context(|| format!("POST 请求 {url} 失败"))?;
     let status = response.status();
     let body = response
         .text()
-        .with_context(|| format!("failed to read response from {url}"))?;
+        .with_context(|| format!("读取响应失败：{url}"))?;
     ensure!(
         status.is_success(),
-        "search request failed with {status}: {body}"
+        "search 请求失败，HTTP {status}：{body}"
     );
 
-    match serde_json::from_str::<serde_json::Value>(&body) {
-        Ok(body) => emit(serde_json::to_string_pretty(&body)?),
-        Err(_) => emit(body),
-    }
-    Ok(())
+    print_json(&body)
 }
 
 fn run() -> Result<()> {
     match Chuanshanjia::parse().command {
         Commands::Services(args) => services(args),
+        Commands::Sellers(args) => sellers(args),
         Commands::Search(args) => search(args),
         Commands::Login(args) => login(args),
         Commands::Logout(args) => logout(args),
@@ -584,6 +640,60 @@ mod tests {
         assert_eq!(DEFAULT_SCOPE, "openid offline_access");
         for business_like in ["chuanshanjia:read", "logs:read"] {
             assert!(!DEFAULT_SCOPE.contains(business_like));
+        }
+    }
+
+    #[test]
+    fn seller_query_maps_each_identifier_shape() {
+        let nick = seller_query("shop", Some("taobao")).unwrap();
+        let id = seller_query("123456", Some("taobao")).unwrap();
+        let store = seller_query("123456", None).unwrap();
+        let leyan = seller_query("3fa85f64-5717-4562-b3fc-2c963f66afa6", None).unwrap();
+
+        assert_eq!(
+            nick,
+            [
+                ("platform", "taobao".to_owned()),
+                ("seller_nick", "shop".to_owned()),
+            ]
+        );
+        assert_eq!(
+            id,
+            [
+                ("platform", "taobao".to_owned()),
+                ("seller_id", "123456".to_owned()),
+            ]
+        );
+        assert_eq!(store, [("seller_id", "123456".to_owned())]);
+        assert_eq!(
+            leyan,
+            [(
+                "leyan_seller_id",
+                "3fa85f64-5717-4562-b3fc-2c963f66afa6".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn seller_query_requires_platform_for_a_nick_and_rejects_an_empty_seller() {
+        let error = seller_query("shop", None).unwrap_err().to_string();
+        assert!(error.contains("--platform"), "unexpected error: {error}");
+        assert!(seller_query("  ", Some("taobao")).is_err());
+    }
+
+    #[test]
+    fn uuid_detection_requires_the_canonical_shape() {
+        assert!(is_uuid("3fa85f64-5717-4562-b3fc-2c963f66afa6"));
+        assert!(is_uuid("3FA85F64-5717-4562-B3FC-2C963F66AFA6"));
+        for value in [
+            "",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa",
+            "3fa85f645717-4562-b3fc-2c963f66afa6",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6-",
+            "3fa85f64-5717-4562-b3fc-2c963f66afzz",
+            "123456",
+        ] {
+            assert!(!is_uuid(value), "accepted {value:?}");
         }
     }
 }

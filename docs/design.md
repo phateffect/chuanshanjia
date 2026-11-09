@@ -7,6 +7,7 @@
 微服务日志分散在不同存储中。当前项目只承担其中一层：为 Agent 和人提供稳定、可组合、少惊扰的命令行入口。
 
 - 用 `chuanshanjia services` 列出后端支持的服务；
+- 用 `chuanshanjia sellers` 按 sellerNick、sellerId、storeId 或 leyanSellerId 查卖家；
 - 用统一的 `chuanshanjia search <service> -f k=v -k kw` 表达查询；
 - 将参数、时间和 token 归一化后调用外部 HTTP 服务；
 - 将服务端 JSON 原样作为 CLI 的结构化结果输出；
@@ -23,8 +24,9 @@
 
 ```text
 ┌──────────────┐   GET /services              ┌────────────────────┐
-│ chuanshanjia │   POST /{service}/_search    │ 外部 HTTP 查询服务 │
-│ CLI          │ ───────────────────────────▶ │ （其他项目实现）   │
+│ chuanshanjia │   GET /sellers               │ 外部 HTTP 查询服务 │
+│ CLI          │   POST /{service}/_search    │ （其他项目实现）   │
+│              │ ───────────────────────────▶ │                    │
 └──────────────┘   Authorization: Bearer JWT  └────────────────────┘
        │
        ▼
@@ -56,6 +58,8 @@ CLI 保留最小查询模型：service、可重复的等值 filter、单个 keyw
 - 请求体为平铺的 `{"filter":...,"keywords":...,"start":...,"end":...}`；
 - CLI 不在本地执行 service 预置合并、provider 查询或响应清洗，这些都是外部服务的职责。
 
+卖家查询是独立的只读命令：`sellers <SELLER> [--platform PLATFORM]` 只把参数形状映射成 `/sellers` 的查询参数，不在本地做模糊匹配或结果过滤。纯 ASCII 数字视为 sellerId/storeId（`seller_id`），UUID 形状视为 leyanSellerId（`leyan_seller_id`），其他视为 sellerNick（`seller_nick`，此时 `--platform` 必填），`--platform` 对前两种形状作为附加约束发送。
+
 服务端契约仍要求预置 filters/keyword 优先，但该安全语义由服务端测试保证，不能再由纯 CLI 仓库的测试代替。
 
 ### 3.2 时间与 URL
@@ -64,15 +68,17 @@ CLI 保留最小查询模型：service、可重复的等值 filter、单个 keyw
 
 默认区间是 UTC+8 当天零点到当前时刻；要求 `start < end`，对外语义为 `[start, end)`。
 
-`base_url` 必须是 HTTP(S) URL。CLI 保留其已有路径前缀；服务列表追加 `services`，查询追加 service 和 `_search` 两个 URL segment，不自行实现 provider 路由。
+`base_url` 必须是 HTTP(S) URL。CLI 保留其已有路径前缀；服务列表追加 `services`，卖家查询追加 `sellers`，查询追加 service 和 `_search` 两个 URL segment，不自行实现 provider 路由。
 
 ### 3.3 HTTP、输出与错误
 
-- 服务列表和搜索使用 reqwest blocking client，CLI 自身没有运行时服务和后台状态；
+- 服务列表、卖家查询和搜索使用 reqwest blocking client，CLI 自身没有运行时服务和后台状态；
+- 卖家参数作为 URL query 发送（`seller_id`、`leyan_seller_id`、`seller_nick` 与 `platform`），由服务端完成互斥校验；
 - token 以 `Authorization: Bearer <JWT>` 发送；
 - localhost、127.0.0.1、::1 自动禁用系统代理，避免企业代理拦截本机请求；
 - 2xx 且响应为 JSON 时 pretty-print，否则原样输出；
 - 非 2xx 输出状态码与响应体并非零退出；
+- 错误与提示统一用中文输出，便于使用者直接阅读；URL、命令名、参数名、HTTP 状态码与上游返回内容保持原样；
 - stdout 的 EPIPE 被忽略，使 `| head` 正常结束而不 panic。
 
 CLI 不负责把服务端错误转换成另一套模型，因此 Python 重实现需要保持响应和错误的 HTTP 语义。
@@ -90,7 +96,7 @@ CLI 不负责把服务端错误转换成另一套模型，因此 Python 重实�
 - 不保存 client_secret，不将凭证内容写入日志；
 - `logout` 只需删除该文件即可清理本地会话。
 
-服务列表和搜索的 token 优先级为 `--token` > 本地登录会话 > 配置文件静态 token。显式参数优先便于一次性覆盖，本地会话优先于静态配置则避免过期配置遮蔽自动续期结果。
+服务列表、卖家查询和搜索的 token 优先级为 `--token` > 本地登录会话 > 配置文件静态 token。显式参数优先便于一次性覆盖，本地会话优先于静态配置则避免过期配置遮蔽自动续期结果。
 
 ## 5. OIDC 设计
 
@@ -144,6 +150,7 @@ CLI 的 resource、外部服务接受的 audience 和 IdP 资源登记必须一�
 - `src/main.rs` 和 `src/oidc.rs` 内单元测试覆盖时间、URL、配置辅助逻辑、JWT 过期解析和 OIDC 细节；
 - `tests/cli.rs` 用 assert_cmd 执行真实二进制，以 mockito 模拟外部 HTTP 服务与 IdP；
 - 服务列表测试验证 GET 路径、Bearer token 和 JSON 输出；搜索测试验证请求 body、Bearer token 优先级、响应输出和非 2xx 错误；
+- 卖家测试验证参数形状到 query 的映射（数字/UUID/昵称+platform）及缺少 `--platform` 的报错；
 - 登录测试覆盖本地配置校验、不请求后端元数据、授权 URL、PKCE、state、loopback 回调、`0600` 凭证、静默续期和登出；
 - 测试主目录与外部命令均使用临时目录，不读取真实用户配置；
 - 不启动原 Rust backend，不请求真实 IdP 或云服务；

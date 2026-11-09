@@ -130,7 +130,7 @@ fn config_requires_editor() {
         .failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("EDITOR is not set"),
+        stderr.contains("EDITOR 未设置"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -161,6 +161,101 @@ fn services_lists_backend_services_with_bearer_token() {
     request.assert();
     let output: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(output, services);
+}
+
+#[test]
+fn sellers_looks_up_a_seller_nick_with_platform() {
+    let mut server = Server::new();
+    let sellers = json!([
+        {
+            "leyan_seller_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "platform": "taobao",
+            "seller_id": 123,
+            "seller_nick": "shop",
+            "store_title": "示例店铺",
+            "enabled": true
+        }
+    ]);
+    let request = server
+        .mock("GET", "/sellers")
+        .match_header("authorization", "Bearer cli-token")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("platform".into(), "taobao".into()),
+            Matcher::UrlEncoded("seller_nick".into(), "shop".into()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(sellers.to_string())
+        .expect(1)
+        .create();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    let assert = chuanshanjia(&home)
+        .args([
+            "sellers",
+            "shop",
+            "--platform",
+            "taobao",
+            "--token",
+            "cli-token",
+        ])
+        .assert()
+        .success();
+
+    request.assert();
+    let output: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(output, sellers);
+}
+
+#[test]
+fn sellers_uses_seller_id_for_digits_and_leyan_seller_id_for_uuids() {
+    let mut server = Server::new();
+    let numeric = server
+        .mock("GET", "/sellers")
+        .match_query(Matcher::Exact("platform=taobao&seller_id=123456".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .expect(1)
+        .create();
+    let leyan_seller_id = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+    let uuid = server
+        .mock("GET", "/sellers")
+        .match_query(Matcher::Exact(format!("leyan_seller_id={leyan_seller_id}")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .expect(1)
+        .create();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    chuanshanjia(&home)
+        .args(["sellers", "123456", "--platform", "taobao"])
+        .assert()
+        .success();
+    chuanshanjia(&home)
+        .args(["sellers", leyan_seller_id])
+        .assert()
+        .success();
+
+    numeric.assert();
+    uuid.assert();
+}
+
+#[test]
+fn sellers_requires_platform_for_a_seller_nick() {
+    let server = Server::new();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    let assert = chuanshanjia(&home)
+        .args(["sellers", "shop"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(stderr.contains("--platform"), "unexpected stderr: {stderr}");
 }
 
 #[test]
@@ -352,7 +447,7 @@ fn search_rejects_invalid_or_reversed_time() {
         .failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("invalid timestamp"),
+        stderr.contains("时间格式无效"),
         "unexpected stderr: {stderr}"
     );
 
@@ -364,7 +459,7 @@ fn search_rejects_invalid_or_reversed_time() {
         .failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("start must be earlier than end"),
+        stderr.contains("start 必须早于 end"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -376,7 +471,7 @@ fn missing_config_fails_with_a_clear_error() {
     let assert = search(&home).assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("failed to read config file"),
+        stderr.contains("读取配置文件"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -389,7 +484,7 @@ fn invalid_config_fails_with_a_clear_error() {
     let assert = search(&home).assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("failed to parse config file"),
+        stderr.contains("解析配置文件"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -402,7 +497,7 @@ fn invalid_base_url_fails_with_a_clear_error() {
     let assert = search(&home).assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("invalid base_url"),
+        stderr.contains("base_url 无效"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -422,10 +517,7 @@ fn request_failure_fails_with_a_clear_error() {
     let assert = search(&home).assert().failure();
     server.join().unwrap();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
-    assert!(
-        stderr.contains("failed to POST to"),
-        "unexpected stderr: {stderr}"
-    );
+    assert!(stderr.contains("POST 请求"), "unexpected stderr: {stderr}");
 }
 
 #[test]
@@ -825,7 +917,7 @@ fn logout_still_removes_credentials_when_revocation_fails() {
     // The warning goes to stdout with the rest of the CLI's messages.
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
     assert!(
-        stdout.contains("could not revoke") || stderr.contains("could not revoke"),
+        stdout.contains("无法吐销会话") || stderr.contains("无法吐销会话"),
         "expected a revocation warning, got: {stdout}{stderr}"
     );
     assert!(!path.exists(), "credentials should still be removed");
@@ -882,7 +974,7 @@ fn login_requires_an_explicit_resource() {
     let assert = chuanshanjia(&home).arg("login").assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("set `resource` in the config file or pass --resource"),
+        stderr.contains("请在配置文件中设置 `resource`"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -898,7 +990,7 @@ fn login_rejects_an_invalid_resource_before_oidc_discovery() {
     let assert = chuanshanjia(&home).arg("login").assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("invalid resource"),
+        stderr.contains("resource 无效"),
         "unexpected stderr: {stderr}"
     );
 }
