@@ -153,17 +153,21 @@ access_key_secret = { env = "ACCESS_KEY_SECRET" }
 
 ## 3. HTTP 契约
 
-### 3.1 公开端点
+### 3.1 通用端点
 
-`GET /`
+除 `GET /health` 外，端点都需要 Bearer JWT；`server.debug=true` 时跳过认证。
 
-- 不需要认证；
-- 返回 `200`，正文为 `hello world`。
+`GET /health` 无需认证，返回 `200` 和 `{"status": "ok"}`。
 
-`GET /.well-known/oauth-protected-resource`
+`GET /services` 按名称排序返回当前支持的 service，每项包含 `name` 和 `description`：
 
-- 不需要认证；
-- 按 RFC 9728 返回：
+```json
+[
+  {"name": "example", "description": "示例日志查询服务"}
+]
+```
+
+`GET /.well-known/oauth-protected-resource` 按 RFC 9728 返回：
 
 ```json
 {
@@ -174,7 +178,7 @@ access_key_secret = { env = "ACCESS_KEY_SECRET" }
 }
 ```
 
-其中 `resource = oidc_audiences[0]`，`authorization_servers` 只含配置的 issuer，`scopes_supported = oidc_required_scopes`。CLI 登录前依赖此端点核对 `resource` 和 issuer，但不会用 `scopes_supported` 限制客户端请求的 scope。
+其中 `resource = oidc_audiences[0]`，`authorization_servers` 只含配置的 issuer，`scopes_supported = oidc_required_scopes`。CLI 登录只进行本地配置校验并访问 IdP，不再请求此前端点；`scopes_supported` 不用于限制客户端请求的 scope。
 
 ### 3.2 搜索请求
 
@@ -297,7 +301,7 @@ discovery/JWKS HTTP 请求超时为 10 秒。只选择满足以下条件的 JWK�
 
 ### 4.4 Bearer 提取与 401
 
-只保护搜索端点，健康检查和资源元数据公开。
+搜索、服务列表和资源元数据要求 Bearer 认证；健康检查公开。`server.debug=true` 时跳过认证。
 
 - 缺少 `Authorization`、非 Bearer scheme、缺少分隔空格或 token 为空：401、空响应体，响应头：
 
@@ -623,7 +627,7 @@ Authorization = HMAC-SHA256 Credential=AKIDexample/19991231/ap-southeast-1/TLS/r
 app.py                  启动顺序、依赖组装、监听
 config.py               配置模型、未知字段拒绝、启动校验、凭证解析
 auth.py                 OIDC discovery、JWKS、JWT 验证、缓存、401
-api.py                  公开端点、搜索请求模型、HTTP 错误映射
+api.py                  受保护端点、搜索请求模型、HTTP 错误映射
 services.py             service 路由、预置合并、清洗管线、对象路径
 errors.py               ProviderError 与统一错误 JSON
 providers/base.py       provider 接口
@@ -645,7 +649,7 @@ providers/tls.py        查询、签名、分页、响应与错误转换
 ### 10.1 必须锁定的测试
 
 - 配置：未知字段、缺失 issuer/audience、非法 URL、未知 storage、空名称、非法路径、缺失环境变量均启动失败；
-- HTTP：健康检查和元数据公开；搜索必须认证； malformed JSON 为 400、未知请求字段为 422；
+- HTTP：健康检查公开，其余端点必须认证；malformed JSON 为 400、未知请求字段为 422；
 - 时间：默认一小时、显式区间、负时间戳、相等/反向区间；
 - 认证：只接受 EdDSA/Ed25519，检查 iss/aud/exp/nbf/scope，单 key 可无 kid，多 key 必须匹配 kid，未知 kid 刷新且限频，成功缓存命中后仍检查 exp；
 - 401：缺凭证为空 body，无效 token 为统一 JSON，两种 `WWW-Authenticate` 值精确匹配；
@@ -654,7 +658,7 @@ providers/tls.py        查询、签名、分页、响应与错误转换
 - ES：查询 body、时间范围、空 keywords 差异、hit fallback、上游错误透传；
 - SLS：查询转义、标量类型、非法 filter、100/1000 分页边界、Complete 汇总、request ID 错误；
 - TLS：查询转义、紧凑请求体、毫秒时间、Context 分页、complete/took 汇总、上述两组签名参考向量、STS 和错误透传；
-- 兼容性：现有 CLI 的 `search`、OIDC 登录前元数据检查、token 刷新后查询均不改变。
+- 兼容性：覆盖 CLI 的 `services`、`search`、不依赖后端元数据的 OIDC 登录，以及 token 刷新后查询。
 
 测试使用 mock HTTP 上游和内存 JWKS/OIDC fixture，不访问真实云服务。
 

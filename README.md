@@ -54,7 +54,15 @@ client_id = "chuanshanjia"
 resource = "https://logs.example.com"
 ```
 
-`base_url` 可以包含路径前缀，CLI 会在其后追加 `/{service}/_search`。`config` 不会覆盖已有文件；`EDITOR` 支持带参数的命令。
+`base_url` 可以包含路径前缀，CLI 会在其后追加 `/services` 或 `/{service}/_search`。`config` 不会覆盖已有文件；`EDITOR` 支持带参数的命令。
+
+## 列出服务
+
+```sh
+chuanshanjia services [--token JWT]
+```
+
+请求 `GET /services`，成功时输出按名称排序的服务 JSON 数组，每项包含 `name` 和 `description`。
 
 ## 查询日志
 
@@ -69,6 +77,7 @@ chuanshanjia search foo \
 命令形式：
 
 ```text
+chuanshanjia services [--token JWT]
 chuanshanjia search <SERVICE> [-f KEY=VALUE]... [-k KEYWORDS] [--token JWT] [--start TIME] [--end TIME]
 chuanshanjia login [--issuer URL] [--client-id ID] [--redirect-uri URI] [--resource URI] [--scope SCOPES] [--no-browser]
 chuanshanjia logout [--local]
@@ -82,7 +91,7 @@ chuanshanjia config
 - 外部服务可配置预置 filter 和 keyword；这些服务端条件是否优先由服务端契约决定，CLI 不在本地合并。
 - 查询结果的具体匹配、分页、排序和字段清洗规则由外部服务及其 provider 决定。
 
-成功时输出格式化 JSON；服务返回非 2xx 时，CLI 输出状态码与响应体并以非零状态退出。输出写 stdout，`| head` 这类提前关闭管道的情况不会 panic。
+`services` 和 `search` 成功时输出格式化 JSON；服务返回非 2xx 时，CLI 输出状态码与响应体并以非零状态退出。输出写 stdout，`| head` 这类提前关闭管道的情况不会 panic。
 
 ### 时间语义
 
@@ -110,23 +119,23 @@ chuanshanjia logout --local        # 只删除本地 token
 - `issuer`、`client_id`、`resource` 可写在配置中，也可用同名参数覆盖。
 - IdP 需要注册公开客户端（token 认证方式 `none`，启用 PKCE）。按 RFC 8252，默认使用 `http://127.0.0.1:0/callback`，由系统选择空闲端口；需要精确匹配固定 URI 的 IdP 可通过 `redirect_uri` 或 `--redirect-uri` 指定已注册地址。
 - CLI 默认请求 `scope = "openid offline_access"`，不请求业务 scope；配置项 `scope` 或 `--scope` 可整体覆盖。带 `offline_access` 时授权请求附加 `prompt=consent`。
-- 业务 scope 由 IdP 按 `resource` 授予。CLI **不使用**资源元数据中的 `scopes_supported` 作为登录前置条件。
+- 业务 scope 由 IdP 按 `resource` 授予。
 - `resource` 没有内置默认值，必须配置或通过 `--resource` 传入。它必须与外部服务的资源标识及 IdP 的资源登记一致。
-- 登录前，CLI 请求 `base_url` 下的 `/.well-known/oauth-protected-resource`，核对 `resource` 以及 `authorization_servers` 是否包含 issuer。检查失败或元数据不可用时不会进入授权流程。
+- 登录前只校验本地 issuer、client、scope 和 resource 配置，不请求后端元数据，因此首次登录不需要已有后端 token。
 - OIDC 本地登录会话只接受 JWT 形态的 access token；不透明或格式不符时报错。
 
 token 保存在 `~/.config/chuanshanjia/credentials.toml`，Unix 下权限为 `0600`，不与手写的 `config.toml` 混合。
 
-`search` 的 token 优先级为 `--token` > 本地登录会话 > 配置文件 `token`。会话进入过期窗口时先用 refresh token 静默续期并回写文件，续期失败则提示重新 `login`。过期时间优先使用 IdP 返回的 `expires_in`；授权码兑换未返回该字段时，退回按 access token 的 JWT `exp` 判断。
+`services` 和 `search` 的 token 优先级为 `--token` > 本地登录会话 > 配置文件 `token`。会话进入过期窗口时先用 refresh token 静默续期并回写文件，续期失败则提示重新 `login`。过期时间优先使用 IdP 返回的 `expires_in`；授权码兑换未返回该字段时，退回按 access token 的 JWT `exp` 判断。
 
 `logout` 默认先按 RFC 7009 使用 refresh token 调 IdP 的 revocation endpoint，再删除本地凭证。IdP 不可达时只打印警告，仍删除本地文件，保证离线也能登出。
 
 ## 外部 HTTP 服务
 
-CLI 依赖两个服务端接口：
+CLI 依赖两个受 Bearer token 保护的服务端接口：
 
-- `POST /{service}/_search`：发送平铺的 `filter`、`keywords`、`start`、`end` 和 Bearer token，接收 JSON 响应；
-- `GET /.well-known/oauth-protected-resource`：登录前读取资源与 issuer 元数据。
+- `GET /services`：列出服务名称与说明；
+- `POST /{service}/_search`：发送平铺的 `filter`、`keywords`、`start`、`end` 和 Bearer token，接收 JSON 响应。
 
 原 Rust 服务端已经移出本仓库。Python 重实现所需的完整请求、响应、认证、provider 和错误契约见 [docs/backend-migration.md](docs/backend-migration.md)。
 
