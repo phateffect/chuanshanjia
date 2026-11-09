@@ -43,6 +43,8 @@ struct Chuanshanjia {
 enum Commands {
     /// List services supported by the backend.
     Services(ServicesArgs),
+    /// Look up sellers by sellerNick, sellerId, storeId, or leyanSellerId.
+    Sellers(SellersArgs),
     /// Search a configured backend service.
     Search(SearchArgs),
     /// Log in through the OIDC issuer and store the tokens.
@@ -55,6 +57,20 @@ enum Commands {
 
 #[derive(Args)]
 struct ServicesArgs {
+    /// Bearer JWT; overrides token from the config file.
+    #[usage(long)]
+    token: Option<String>,
+}
+
+#[derive(Args)]
+struct SellersArgs {
+    /// sellerNick, sellerId, storeId, or leyanSellerId.
+    seller: String,
+
+    /// Platform that limits the query; required for a sellerNick.
+    #[usage(long)]
+    platform: Option<String>,
+
     /// Bearer JWT; overrides token from the config file.
     #[usage(long)]
     token: Option<String>,
@@ -419,13 +435,7 @@ fn search_url(base_url: &str, service: &str) -> Result<reqwest::Url> {
     backend_url(base_url, &[service, "_search"])
 }
 
-fn services(args: ServicesArgs) -> Result<()> {
-    let path = config_path()?;
-    let config = read_config(&path)?;
-    let url = backend_url(&config.base_url, &["services"])
-        .with_context(|| format!("invalid base_url in {}", path.display()))?;
-    let token = resolve_token(args.token, &config)?;
-
+fn http_client(url: &reqwest::Url) -> Result<reqwest::blocking::Client> {
     let mut client = reqwest::blocking::Client::builder();
     if matches!(
         url.host_str(),
@@ -433,7 +443,19 @@ fn services(args: ServicesArgs) -> Result<()> {
     ) {
         client = client.no_proxy();
     }
-    let client = client.build().context("failed to build HTTP client")?;
+    client.build().context("failed to build HTTP client")
+}
+
+fn print_json(body: &str) -> Result<()> {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(body) => emit(serde_json::to_string_pretty(&body)?),
+        Err(_) => emit(body),
+    }
+    Ok(())
+}
+
+fn http_get(url: &reqwest::Url, token: Option<String>, label: &str) -> Result<String> {
+    let client = http_client(url)?;
     let request = client.get(url.clone());
     let request = match token {
         Some(token) => request.bearer_auth(token),
@@ -448,14 +470,63 @@ fn services(args: ServicesArgs) -> Result<()> {
         .with_context(|| format!("failed to read response from {url}"))?;
     ensure!(
         status.is_success(),
-        "services request failed with {status}: {body}"
+        "{label} request failed with {status}: {body}"
     );
+    Ok(body)
+}
 
-    match serde_json::from_str::<serde_json::Value>(&body) {
-        Ok(body) => emit(serde_json::to_string_pretty(&body)?),
-        Err(_) => emit(body),
+/// leyanSellerId is a canonical UUID; only its shape matters here.
+fn is_uuid(value: &str) -> bool {
+    let mut groups = value.split('-');
+    [8, 4, 4, 4, 12].iter().all(|&width| {
+        groups.next().is_some_and(|group| {
+            group.len() == width && group.chars().all(|c| c.is_ascii_hexdigit())
+        })
+    }) && groups.next().is_none()
+}
+
+/// Map SELLER to the `/sellers` query: ASCII digits are a sellerId/storeId,
+/// a UUID is a leyanSellerId, and anything else is a sellerNick, which the
+/// backend only accepts together with a platform.
+fn seller_query(seller: &str, platform: Option<&str>) -> Result<Vec<(&'static str, String)>> {
+    ensure!(!seller.trim().is_empty(), "SELLER must not be empty");
+    let key = if seller.chars().all(|c| c.is_ascii_digit()) {
+        "seller_id"
+    } else if is_uuid(seller) {
+        "leyan_seller_id"
+    } else {
+        ensure!(
+            platform.is_some_and(|platform| !platform.trim().is_empty()),
+            "SELLER {seller:?} is treated as a sellerNick; pass --platform to limit the platform"
+        );
+        "seller_nick"
+    };
+    let mut params = Vec::new();
+    if let Some(platform) = platform.filter(|platform| !platform.trim().is_empty()) {
+        params.push(("platform", platform.to_owned()));
     }
-    Ok(())
+    params.push((key, seller.to_owned()));
+    Ok(params)
+}
+
+fn services(args: ServicesArgs) -> Result<()> {
+    let path = config_path()?;
+    let config = read_config(&path)?;
+    let url = backend_url(&config.base_url, &["services"])
+        .with_context(|| format!("invalid base_url in {}", path.display()))?;
+    let token = resolve_token(args.token, &config)?;
+    print_json(&http_get(&url, token, "services")?)
+}
+
+fn sellers(args: SellersArgs) -> Result<()> {
+    let params = seller_query(&args.seller, args.platform.as_deref())?;
+    let path = config_path()?;
+    let config = read_config(&path)?;
+    let mut url = backend_url(&config.base_url, &["sellers"])
+        .with_context(|| format!("invalid base_url in {}", path.display()))?;
+    let token = resolve_token(args.token, &config)?;
+    url.query_pairs_mut().extend_pairs(params);
+    print_json(&http_get(&url, token, "sellers")?)
 }
 
 fn search(args: SearchArgs) -> Result<()> {
@@ -480,14 +551,7 @@ fn search(args: SearchArgs) -> Result<()> {
     body.insert("end".to_owned(), args.end.0.into());
     let body = serde_json::Value::Object(body);
 
-    let mut client = reqwest::blocking::Client::builder();
-    if matches!(
-        url.host_str(),
-        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
-    ) {
-        client = client.no_proxy();
-    }
-    let client = client.build().context("failed to build HTTP client")?;
+    let client = http_client(&url)?;
     let request = client.post(url.clone()).json(&body);
     let request = match token {
         Some(token) => request.bearer_auth(token),
@@ -505,16 +569,13 @@ fn search(args: SearchArgs) -> Result<()> {
         "search request failed with {status}: {body}"
     );
 
-    match serde_json::from_str::<serde_json::Value>(&body) {
-        Ok(body) => emit(serde_json::to_string_pretty(&body)?),
-        Err(_) => emit(body),
-    }
-    Ok(())
+    print_json(&body)
 }
 
 fn run() -> Result<()> {
     match Chuanshanjia::parse().command {
         Commands::Services(args) => services(args),
+        Commands::Sellers(args) => sellers(args),
         Commands::Search(args) => search(args),
         Commands::Login(args) => login(args),
         Commands::Logout(args) => logout(args),
@@ -584,6 +645,60 @@ mod tests {
         assert_eq!(DEFAULT_SCOPE, "openid offline_access");
         for business_like in ["chuanshanjia:read", "logs:read"] {
             assert!(!DEFAULT_SCOPE.contains(business_like));
+        }
+    }
+
+    #[test]
+    fn seller_query_maps_each_identifier_shape() {
+        let nick = seller_query("shop", Some("taobao")).unwrap();
+        let id = seller_query("123456", Some("taobao")).unwrap();
+        let store = seller_query("123456", None).unwrap();
+        let leyan = seller_query("3fa85f64-5717-4562-b3fc-2c963f66afa6", None).unwrap();
+
+        assert_eq!(
+            nick,
+            [
+                ("platform", "taobao".to_owned()),
+                ("seller_nick", "shop".to_owned()),
+            ]
+        );
+        assert_eq!(
+            id,
+            [
+                ("platform", "taobao".to_owned()),
+                ("seller_id", "123456".to_owned()),
+            ]
+        );
+        assert_eq!(store, [("seller_id", "123456".to_owned())]);
+        assert_eq!(
+            leyan,
+            [(
+                "leyan_seller_id",
+                "3fa85f64-5717-4562-b3fc-2c963f66afa6".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn seller_query_requires_platform_for_a_nick_and_rejects_an_empty_seller() {
+        let error = seller_query("shop", None).unwrap_err().to_string();
+        assert!(error.contains("--platform"), "unexpected error: {error}");
+        assert!(seller_query("  ", Some("taobao")).is_err());
+    }
+
+    #[test]
+    fn uuid_detection_requires_the_canonical_shape() {
+        assert!(is_uuid("3fa85f64-5717-4562-b3fc-2c963f66afa6"));
+        assert!(is_uuid("3FA85F64-5717-4562-B3FC-2C963F66AFA6"));
+        for value in [
+            "",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa",
+            "3fa85f645717-4562-b3fc-2c963f66afa6",
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6-",
+            "3fa85f64-5717-4562-b3fc-2c963f66afzz",
+            "123456",
+        ] {
+            assert!(!is_uuid(value), "accepted {value:?}");
         }
     }
 }

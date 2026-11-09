@@ -164,6 +164,99 @@ fn services_lists_backend_services_with_bearer_token() {
 }
 
 #[test]
+fn sellers_looks_up_a_seller_nick_with_platform() {
+    let mut server = Server::new();
+    let sellers = json!([
+        {
+            "leyan_seller_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "platform": "taobao",
+            "seller_id": 123,
+            "enabled": true
+        }
+    ]);
+    let request = server
+        .mock("GET", "/sellers")
+        .match_header("authorization", "Bearer cli-token")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("platform".into(), "taobao".into()),
+            Matcher::UrlEncoded("seller_nick".into(), "shop".into()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(sellers.to_string())
+        .expect(1)
+        .create();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    let assert = chuanshanjia(&home)
+        .args([
+            "sellers",
+            "shop",
+            "--platform",
+            "taobao",
+            "--token",
+            "cli-token",
+        ])
+        .assert()
+        .success();
+
+    request.assert();
+    let output: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(output, sellers);
+}
+
+#[test]
+fn sellers_uses_seller_id_for_digits_and_leyan_seller_id_for_uuids() {
+    let mut server = Server::new();
+    let numeric = server
+        .mock("GET", "/sellers")
+        .match_query(Matcher::Exact("platform=taobao&seller_id=123456".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .expect(1)
+        .create();
+    let leyan_seller_id = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+    let uuid = server
+        .mock("GET", "/sellers")
+        .match_query(Matcher::Exact(format!("leyan_seller_id={leyan_seller_id}")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .expect(1)
+        .create();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    chuanshanjia(&home)
+        .args(["sellers", "123456", "--platform", "taobao"])
+        .assert()
+        .success();
+    chuanshanjia(&home)
+        .args(["sellers", leyan_seller_id])
+        .assert()
+        .success();
+
+    numeric.assert();
+    uuid.assert();
+}
+
+#[test]
+fn sellers_requires_platform_for_a_seller_nick() {
+    let server = Server::new();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    let assert = chuanshanjia(&home)
+        .args(["sellers", "shop"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(stderr.contains("--platform"), "unexpected stderr: {stderr}");
+}
+
+#[test]
 fn search_sends_filters_keywords_and_time_range() {
     let start = chrono::DateTime::parse_from_rfc3339("2026-10-14T02:01:02Z")
         .unwrap()
