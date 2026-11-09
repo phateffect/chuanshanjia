@@ -31,7 +31,7 @@ const DEFAULT_REDIRECT_URI: &str = "http://127.0.0.1:0/callback";
 const DEFAULT_SCOPE: &str = "openid offline_access";
 const DEFAULT_CONFIG: &str = "base_url = \"\"\n# token = \"\"\n# issuer = \"https://oidc.example.com\"\n# client_id = \"chuanshanjia\"\nresource = \"\"\nscope = \"openid offline_access\"\n";
 
-/// Search logs through a chuanshanjia backend.
+/// 通过 chuanshanjia 后端查询日志。
 #[derive(Cli)]
 #[usage(bin = "chuanshanjia", version = "0.1.0", arg_required_else_help)]
 struct Chuanshanjia {
@@ -41,72 +41,72 @@ struct Chuanshanjia {
 
 #[derive(Subcommands)]
 enum Commands {
-    /// List services supported by the backend.
+    /// 列出后端支持的 service。
     Services(ServicesArgs),
-    /// Look up sellers by sellerNick, sellerId, storeId, or leyanSellerId.
+    /// 按 sellerNick、sellerId、storeId 或 leyanSellerId 查卖家。
     Sellers(SellersArgs),
-    /// Search a configured backend service.
+    /// 查询指定的后端 service。
     Search(SearchArgs),
-    /// Log in through the OIDC issuer and store the tokens.
+    /// 通过 OIDC issuer 登录并保存 token。
     Login(LoginArgs),
-    /// Log out: revoke the tokens at the IdP and remove them locally.
+    /// 登出：在 IdP 吐销 token 并删除本地凭证。
     Logout(LogoutArgs),
-    /// Create the config file if needed and open it with EDITOR.
+    /// 按需创建配置文件并用 EDITOR 打开。
     Config,
 }
 
 #[derive(Args)]
 struct ServicesArgs {
-    /// Bearer JWT; overrides token from the config file.
+    /// Bearer JWT；覆盖配置文件中的 token。
     #[usage(long)]
     token: Option<String>,
 }
 
 #[derive(Args)]
 struct SellersArgs {
-    /// sellerNick, sellerId, storeId, or leyanSellerId.
+    /// sellerNick、sellerId、storeId 或 leyanSellerId。
     seller: String,
 
-    /// Platform that limits the query; required for a sellerNick.
+    /// 限定平台；sellerNick 必填。
     #[usage(long)]
     platform: Option<String>,
 
-    /// Bearer JWT; overrides token from the config file.
+    /// Bearer JWT；覆盖配置文件中的 token。
     #[usage(long)]
     token: Option<String>,
 }
 
 #[derive(Args)]
 struct LogoutArgs {
-    /// Only delete the local credentials; keep the session valid at the IdP.
+    /// 只删除本地凭证，保留 IdP 上的会话。
     #[usage(long)]
     local: bool,
 }
 
 #[derive(Args)]
 struct LoginArgs {
-    /// OIDC issuer; defaults to `issuer` in the config file.
+    /// OIDC issuer；默认取配置文件中的 `issuer`。
     #[usage(long)]
     issuer: Option<String>,
 
-    /// OIDC client id; defaults to `client_id` in the config file.
+    /// OIDC client id；默认取配置文件中的 `client_id`。
     #[usage(long)]
     client_id: Option<String>,
 
-    /// Loopback redirect URI; must match the client registration exactly.
+    /// Loopback redirect URI；必须与客户端注册完全一致。
     #[usage(long)]
     redirect_uri: Option<String>,
 
-    /// Scopes to request; defaults to `scope` in the config, then
-    /// `openid offline_access`. Business scopes come from the IdP via `resource`.
+    /// 请求的 scope；默认取配置文件中的 `scope`，再退回
+    /// `openid offline_access`。业务 scope 由 IdP 按 `resource` 授予。
     #[usage(long)]
     scope: Option<String>,
 
-    /// Resource the token is for (RFC 8707); required unless set in the config.
+    /// token 对应的 resource（RFC 8707）；配置文件中未设置时必填。
     #[usage(long)]
     resource: Option<String>,
 
-    /// Print the authorization URL instead of opening a browser.
+    /// 只打印授权 URL，不打开浏览器。
     #[usage(long)]
     no_browser: bool,
 }
@@ -114,27 +114,27 @@ struct LoginArgs {
 #[derive(Args)]
 #[usage(group("query", required, multiple), args_override_self = false)]
 struct SearchArgs {
-    /// Name of the configured search service.
+    /// 要查询的 service 名称。
     service: String,
 
-    /// Exact-match filter in KEY=VALUE form; may be repeated.
+    /// KEY=VALUE 形式的等值过滤条件；可重复。
     #[usage(short = 'f', long, group = "query", value_name = "KEY=VALUE")]
     filter: Vec<Filter>,
 
-    /// Full-text keywords; may be supplied at most once.
+    /// 全文关键词；最多出现一次。
     #[usage(short = 'k', long, group = "query")]
     keywords: Option<String>,
 
-    /// Bearer JWT; overrides token from the config file.
+    /// Bearer JWT；覆盖配置文件中的 token。
     #[usage(long)]
     token: Option<String>,
 
-    /// Start time: ISO 8601 with timezone, local (+08:00) datetime, or epoch seconds.
-    #[usage(long, default_fn = default_start, default_note = "today at 00:00:00 +08:00")]
+    /// 开始时间：带时区的 ISO 8601、本地（+08:00）时间或 epoch 秒。
+    #[usage(long, default_fn = default_start, default_note = "今天 00:00:00 +08:00")]
     start: Timestamp,
 
-    /// End time: ISO 8601 with timezone, local (+08:00) datetime, or epoch seconds.
-    #[usage(long, default_fn = default_end, default_note = "now")]
+    /// 结束时间：带时区的 ISO 8601、本地（+08:00）时间或 epoch 秒。
+    #[usage(long, default_fn = default_end, default_note = "当前时间")]
     end: Timestamp,
 }
 
