@@ -136,6 +136,34 @@ fn config_requires_editor() {
 }
 
 #[test]
+fn services_lists_backend_services_with_bearer_token() {
+    let mut server = Server::new();
+    let services = json!([
+        {"name": "dealer", "description": "Query dealer logs"},
+        {"name": "example", "description": "Example log service"}
+    ]);
+    let request = server
+        .mock("GET", "/services")
+        .match_header("authorization", "Bearer cli-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(services.to_string())
+        .expect(1)
+        .create();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    let assert = chuanshanjia(&home)
+        .args(["services", "--token", "cli-token"])
+        .assert()
+        .success();
+
+    request.assert();
+    let output: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(output, services);
+}
+
+#[test]
 fn search_sends_filters_keywords_and_time_range() {
     let start = chrono::DateTime::parse_from_rfc3339("2026-10-14T02:01:02Z")
         .unwrap()
@@ -553,6 +581,7 @@ fn login_runs_pkce_flow_and_stores_tokens() {
             })
             .to_string(),
         )
+        .expect(0)
         .create();
 
     let home = TempDir::new().expect("temporary home should be created");
@@ -859,33 +888,17 @@ fn login_requires_an_explicit_resource() {
 }
 
 #[test]
-fn login_rejects_a_resource_mismatch_before_oidc_discovery() {
-    let mut backend = Server::new();
-    let metadata = backend
-        .mock("GET", "/.well-known/oauth-protected-resource")
-        .with_body(
-            json!({
-                "resource": "https://logs.example.com",
-                "authorization_servers": ["https://idp.example.com"],
-                "scopes_supported": ["logs:read"],
-            })
-            .to_string(),
-        )
-        .create();
+fn login_rejects_an_invalid_resource_before_oidc_discovery() {
     let home = TempDir::new().expect("temporary home should be created");
     write_config(
         &home,
-        &format!(
-            "base_url = \"{}\"\nissuer = \"https://idp.example.com\"\nclient_id = \"cli\"\nresource = \"https://wrong.example.com\"\n",
-            backend.url()
-        ),
+        "base_url = \"\"\nissuer = \"https://idp.example.com\"\nclient_id = \"cli\"\nresource = \"not-a-url\"\n",
     );
 
     let assert = chuanshanjia(&home).arg("login").assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("does not match backend resource"),
+        stderr.contains("invalid resource"),
         "unexpected stderr: {stderr}"
     );
-    metadata.assert();
 }

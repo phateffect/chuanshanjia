@@ -41,6 +41,8 @@ struct Chuanshanjia {
 
 #[derive(Subcommands)]
 enum Commands {
+    /// List services supported by the backend.
+    Services(ServicesArgs),
     /// Search a configured backend service.
     Search(SearchArgs),
     /// Log in through the OIDC issuer and store the tokens.
@@ -49,6 +51,13 @@ enum Commands {
     Logout(LogoutArgs),
     /// Create the config file if needed and open it with EDITOR.
     Config,
+}
+
+#[derive(Args)]
+struct ServicesArgs {
+    /// Bearer JWT; overrides token from the config file.
+    #[usage(long)]
+    token: Option<String>,
 }
 
 #[derive(Args)]
@@ -201,12 +210,6 @@ struct Config {
     scope: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct ResourceMetadata {
-    resource: String,
-    authorization_servers: Vec<String>,
-}
-
 fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     if let Some(profile) = std::env::var_os("USERPROFILE").filter(|profile| !profile.is_empty()) {
@@ -303,36 +306,7 @@ fn load_stored_token() -> Result<Option<String>> {
     Ok(Some(oidc::bearer_token(&credentials)?.to_owned()))
 }
 
-fn validate_login_metadata(
-    metadata: &ResourceMetadata,
-    issuer: &str,
-    resource: &str,
-) -> Result<()> {
-    ensure!(
-        metadata.resource == resource,
-        "resource {resource:?} does not match backend resource {:?}",
-        metadata.resource
-    );
-    let issuer = issuer.trim_end_matches('/');
-    ensure!(
-        metadata
-            .authorization_servers
-            .iter()
-            .any(|candidate| candidate.trim_end_matches('/') == issuer),
-        "issuer {issuer:?} is not listed in backend authorization_servers {:?}",
-        metadata.authorization_servers
-    );
-    // `scopes_supported` advertises the business scopes the backend checks, but
-    // those are granted by the IdP based on the resource, not requested by the
-    // client, so they are deliberately not validated here. Since the token can
-    // only be obtained through the IdP, comparing the two would reject correct
-    // configurations and cannot verify anything the IdP does not already
-    // enforce.
-    Ok(())
-}
-
 fn check_login_config(
-    base_url: &str,
     issuer: &str,
     client_id: &str,
     scope: Option<&str>,
@@ -353,21 +327,7 @@ fn check_login_config(
         resource_url.fragment().is_none(),
         "resource must not contain a fragment"
     );
-
-    let url = backend_url(base_url, &[".well-known", "oauth-protected-resource"])
-        .context("invalid base_url")?;
-    let response = oidc::client()?
-        .get(url.clone())
-        .send()
-        .with_context(|| format!("failed to GET backend resource metadata {url}"))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .context("failed to read backend resource metadata")?;
-    ensure!(status.is_success(), "GET {url} returned {status}: {body}");
-    let metadata: ResourceMetadata = serde_json::from_str(&body)
-        .with_context(|| format!("invalid resource metadata at {url}"))?;
-    validate_login_metadata(&metadata, issuer, resource)
+    Ok(())
 }
 
 fn login(args: LoginArgs) -> Result<()> {
@@ -394,14 +354,8 @@ fn login(args: LoginArgs) -> Result<()> {
         .resource
         .or(config.resource.clone())
         .context("set `resource` in the config file or pass --resource")?;
-    check_login_config(
-        &config.base_url,
-        &issuer,
-        &client_id,
-        Some(&scope),
-        &resource,
-    )
-    .with_context(|| format!("login configuration check failed for {}", path.display()))?;
+    check_login_config(&issuer, &client_id, Some(&scope), &resource)
+        .with_context(|| format!("login configuration check failed for {}", path.display()))?;
     let credentials = oidc::login(
         &issuer,
         &client_id,
@@ -465,6 +419,45 @@ fn search_url(base_url: &str, service: &str) -> Result<reqwest::Url> {
     backend_url(base_url, &[service, "_search"])
 }
 
+fn services(args: ServicesArgs) -> Result<()> {
+    let path = config_path()?;
+    let config = read_config(&path)?;
+    let url = backend_url(&config.base_url, &["services"])
+        .with_context(|| format!("invalid base_url in {}", path.display()))?;
+    let token = resolve_token(args.token, &config)?;
+
+    let mut client = reqwest::blocking::Client::builder();
+    if matches!(
+        url.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    ) {
+        client = client.no_proxy();
+    }
+    let client = client.build().context("failed to build HTTP client")?;
+    let request = client.get(url.clone());
+    let request = match token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    };
+    let response = request
+        .send()
+        .with_context(|| format!("failed to GET {url}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .with_context(|| format!("failed to read response from {url}"))?;
+    ensure!(
+        status.is_success(),
+        "services request failed with {status}: {body}"
+    );
+
+    match serde_json::from_str::<serde_json::Value>(&body) {
+        Ok(body) => emit(serde_json::to_string_pretty(&body)?),
+        Err(_) => emit(body),
+    }
+    Ok(())
+}
+
 fn search(args: SearchArgs) -> Result<()> {
     ensure!(args.start.0 < args.end.0, "start must be earlier than end");
 
@@ -521,6 +514,7 @@ fn search(args: SearchArgs) -> Result<()> {
 
 fn run() -> Result<()> {
     match Chuanshanjia::parse().command {
+        Commands::Services(args) => services(args),
         Commands::Search(args) => search(args),
         Commands::Login(args) => login(args),
         Commands::Logout(args) => logout(args),
@@ -583,50 +577,6 @@ mod tests {
         assert!((before..=after).contains(&args.end.0));
         assert_eq!(args.service, "foo");
         assert_eq!(args.keywords.as_deref(), Some("timeout"));
-    }
-
-    #[test]
-    fn login_metadata_must_match_resource_and_issuer() {
-        // Business scopes are granted by the IdP from the resource, so a
-        // `scopes_supported` advertisement in the backend metadata must not
-        // gate the login flow, and is not even parsed.
-        let metadata: ResourceMetadata = serde_json::from_value(serde_json::json!({
-            "resource": "https://logs.example.com",
-            "authorization_servers": ["https://idp.example.com"],
-            "scopes_supported": ["logs:read", "logs:export"],
-        }))
-        .unwrap();
-        validate_login_metadata(
-            &metadata,
-            "https://idp.example.com/",
-            "https://logs.example.com",
-        )
-        .unwrap();
-
-        let error = validate_login_metadata(
-            &metadata,
-            "https://idp.example.com",
-            "https://other.example.com",
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("does not match backend resource")
-        );
-
-        let metadata: ResourceMetadata = serde_json::from_value(serde_json::json!({
-            "resource": "https://logs.example.com",
-            "authorization_servers": ["https://other.example.com"],
-        }))
-        .unwrap();
-        let error = validate_login_metadata(
-            &metadata,
-            "https://idp.example.com",
-            "https://logs.example.com",
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("authorization_servers"));
     }
 
     #[test]

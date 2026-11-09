@@ -6,6 +6,7 @@
 
 微服务日志分散在不同存储中。当前项目只承担其中一层：为 Agent 和人提供稳定、可组合、少惊扰的命令行入口。
 
+- 用 `chuanshanjia services` 列出后端支持的服务；
 - 用统一的 `chuanshanjia search <service> -f k=v -k kw` 表达查询；
 - 将参数、时间和 token 归一化后调用外部 HTTP 服务；
 - 将服务端 JSON 原样作为 CLI 的结构化结果输出；
@@ -21,12 +22,11 @@
 ## 2. 总体架构
 
 ```text
-┌──────────────┐   POST /{service}/_search    ┌────────────────────┐
-│ chuanshanjia │ ───────────────────────────▶ │ 外部 HTTP 查询服务 │
-│ CLI          │   Authorization: Bearer JWT  │ （其他项目实现）   │
-└──────────────┘                              └────────────────────┘
-       │  ▲
-       │  └──────── GET /.well-known/oauth-protected-resource
+┌──────────────┐   GET /services              ┌────────────────────┐
+│ chuanshanjia │   POST /{service}/_search    │ 外部 HTTP 查询服务 │
+│ CLI          │ ───────────────────────────▶ │ （其他项目实现）   │
+└──────────────┘   Authorization: Bearer JWT  └────────────────────┘
+       │
        ▼
 ~/.config/chuanshanjia/
   config.toml
@@ -64,11 +64,11 @@ CLI 保留最小查询模型：service、可重复的等值 filter、单个 keyw
 
 默认区间是 UTC+8 当天零点到当前时刻；要求 `start < end`，对外语义为 `[start, end)`。
 
-`base_url` 必须是 HTTP(S) URL。CLI 保留其已有路径前缀，追加 service 和 `_search` 两个 URL segment，不自行实现 provider 路由。
+`base_url` 必须是 HTTP(S) URL。CLI 保留其已有路径前缀；服务列表追加 `services`，查询追加 service 和 `_search` 两个 URL segment，不自行实现 provider 路由。
 
 ### 3.3 HTTP、输出与错误
 
-- 搜索使用 reqwest blocking client，CLI 自身没有运行时服务和后台状态；
+- 服务列表和搜索使用 reqwest blocking client，CLI 自身没有运行时服务和后台状态；
 - token 以 `Authorization: Bearer <JWT>` 发送；
 - localhost、127.0.0.1、::1 自动禁用系统代理，避免企业代理拦截本机请求；
 - 2xx 且响应为 JSON 时 pretty-print，否则原样输出；
@@ -90,7 +90,7 @@ CLI 不负责把服务端错误转换成另一套模型，因此 Python 重实�
 - 不保存 client_secret，不将凭证内容写入日志；
 - `logout` 只需删除该文件即可清理本地会话。
 
-搜索时 token 优先级为 `--token` > 本地登录会话 > 配置文件静态 token。显式参数优先便于一次性覆盖，本地会话优先于静态配置则避免过期配置遮蔽自动续期结果。
+服务列表和搜索的 token 优先级为 `--token` > 本地登录会话 > 配置文件静态 token。显式参数优先便于一次性覆盖，本地会话优先于静态配置则避免过期配置遮蔽自动续期结果。
 
 ## 5. OIDC 设计
 
@@ -98,12 +98,7 @@ CLI 不负责把服务端错误转换成另一套模型，因此 Python 重实�
 
 信任链是 **CLI 向 IdP 获取 token，外部服务验证 token**。服务端不通过 CLI 签发 token，CLI 也不自行判断业务权限。
 
-登录前读取 `base_url` 下的 RFC 9728 资源元数据：
-
-- `resource` 必须与 CLI 配置完全一致；
-- issuer 去掉末尾 `/` 后必须出现在 `authorization_servers`；
-- 不用 `scopes_supported` 做前置校验，因为业务 scope 可由 IdP 按 resource 授予，而不是由客户端请求决定；
-- 元数据不可用或检查失败时不进入浏览器授权流程。
+登录只校验本地 issuer、client、scope 和 resource 配置，然后直接访问 IdP。后端除 `/health` 外的接口（包括 RFC 9728 资源元数据）都要求 Bearer token，因此登录流程不再依赖未认证的后端元数据请求。业务 scope 仍由 IdP 按 resource 授予，而不是由客户端请求决定。
 
 ### 5.2 授权码 + PKCE
 
@@ -148,8 +143,8 @@ CLI 的 resource、外部服务接受的 audience 和 IdP 资源登记必须一�
 
 - `src/main.rs` 和 `src/oidc.rs` 内单元测试覆盖时间、URL、配置辅助逻辑、JWT 过期解析和 OIDC 细节；
 - `tests/cli.rs` 用 assert_cmd 执行真实二进制，以 mockito 模拟外部 HTTP 服务与 IdP；
-- 搜索测试验证请求 body、Bearer token 优先级、响应输出和非 2xx 错误；
-- 登录测试覆盖元数据预检、授权 URL、PKCE、state、loopback 回调、`0600` 凭证、静默续期和登出；
+- 服务列表测试验证 GET 路径、Bearer token 和 JSON 输出；搜索测试验证请求 body、Bearer token 优先级、响应输出和非 2xx 错误；
+- 登录测试覆盖本地配置校验、不请求后端元数据、授权 URL、PKCE、state、loopback 回调、`0600` 凭证、静默续期和登出；
 - 测试主目录与外部命令均使用临时目录，不读取真实用户配置；
 - 不启动原 Rust backend，不请求真实 IdP 或云服务；
 - CI 在 macOS、Ubuntu、Windows 运行 `fmt-check → test → lint → build`，clippy 使用 `-D warnings`；release 只构建 CLI。
