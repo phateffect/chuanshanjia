@@ -45,6 +45,8 @@ enum Commands {
     Services(ServicesArgs),
     /// 按 sellerNick、sellerId、storeId 或 leyanSellerId 查卖家。
     Sellers(SellersArgs),
+    /// 运行指定的 exam，按买家查询诊断数据。
+    Exam(ExamArgs),
     /// 查询指定的后端 service。
     Search(SearchArgs),
     /// 通过 OIDC issuer 登录并保存 token。
@@ -70,6 +72,19 @@ struct SellersArgs {
     /// 限定平台；sellerNick 必填。
     #[usage(long)]
     platform: Option<String>,
+
+    /// Bearer JWT；覆盖配置文件中的 token。
+    #[usage(long)]
+    token: Option<String>,
+}
+
+#[derive(Args)]
+struct ExamArgs {
+    /// exam 名称，如 mixer-config-exam。
+    exam: String,
+
+    /// 买家的 leyanBuyerId，必须是 UUID。
+    leyan_buyer_id: String,
 
     /// Bearer JWT；覆盖配置文件中的 token。
     #[usage(long)]
@@ -524,6 +539,24 @@ fn sellers(args: SellersArgs) -> Result<()> {
     print_json(&http_get(&url, token, "sellers")?)
 }
 
+fn exam(args: ExamArgs) -> Result<()> {
+    ensure!(!args.exam.trim().is_empty(), "exam 名称不能为空");
+    ensure!(
+        is_uuid(&args.leyan_buyer_id),
+        "leyanBuyerId 必须是 UUID，得到 {:?}",
+        args.leyan_buyer_id
+    );
+    let path = config_path()?;
+    let config = read_config(&path)?;
+    let url = backend_url(
+        &config.base_url,
+        &["api", "exams", &args.exam, &args.leyan_buyer_id],
+    )
+    .with_context(|| format!("配置文件 {} 中的 base_url 无效", path.display()))?;
+    let token = resolve_token(args.token, &config)?;
+    print_json(&http_get(&url, token, "exam")?)
+}
+
 fn search(args: SearchArgs) -> Result<()> {
     ensure!(args.start.0 < args.end.0, "start 必须早于 end");
 
@@ -571,6 +604,7 @@ fn run() -> Result<()> {
     match Chuanshanjia::parse().command {
         Commands::Services(args) => services(args),
         Commands::Sellers(args) => sellers(args),
+        Commands::Exam(args) => exam(args),
         Commands::Search(args) => search(args),
         Commands::Login(args) => login(args),
         Commands::Logout(args) => logout(args),

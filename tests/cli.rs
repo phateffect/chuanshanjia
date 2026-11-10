@@ -994,3 +994,92 @@ fn login_rejects_an_invalid_resource_before_oidc_discovery() {
         "unexpected stderr: {stderr}"
     );
 }
+
+#[test]
+fn exam_requests_the_named_exam_for_a_buyer() {
+    let mut server = Server::new();
+    let leyan_buyer_id = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+    let body = json!({
+        "exam": "mixer-config-exam",
+        "leyan_buyer_id": leyan_buyer_id,
+        "result": {
+            "leyan_seller_id": "6a891eee-9a0a-177a-1f06-59ee30f64941",
+            "platform": "taobao",
+            "seller_id": 123456,
+            "seller_nick": "shop",
+            "enabled": true,
+            "executor_config": null,
+            "executor_config_canary": null
+        }
+    });
+    let request = server
+        .mock(
+            "GET",
+            format!("/api/exams/mixer-config-exam/{leyan_buyer_id}").as_str(),
+        )
+        .match_header("authorization", "Bearer cli-token")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(body.to_string())
+        .expect(1)
+        .create();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    let assert = chuanshanjia(&home)
+        .args([
+            "exam",
+            "mixer-config-exam",
+            leyan_buyer_id,
+            "--token",
+            "cli-token",
+        ])
+        .assert()
+        .success();
+
+    request.assert();
+    let output: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(output, body);
+}
+
+#[test]
+fn exam_rejects_a_non_uuid_buyer() {
+    let server = Server::new();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    let assert = chuanshanjia(&home)
+        .args(["exam", "mixer-config-exam", "not-a-uuid"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(stderr.contains("UUID"), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn exam_surfaces_backend_errors() {
+    let mut server = Server::new();
+    let leyan_buyer_id = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+    server
+        .mock(
+            "GET",
+            format!("/api/exams/mixer-config-exam/{leyan_buyer_id}").as_str(),
+        )
+        .with_status(404)
+        .with_header("content-type", "application/json")
+        .with_body("{\"detail\":\"buyer not found\"}")
+        .expect(1)
+        .create();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    let assert = chuanshanjia(&home)
+        .args(["exam", "mixer-config-exam", leyan_buyer_id])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("HTTP 404") && stderr.contains("buyer not found"),
+        "unexpected stderr: {stderr}"
+    );
+}

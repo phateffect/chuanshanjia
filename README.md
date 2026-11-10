@@ -54,7 +54,7 @@ client_id = "chuanshanjia"
 resource = "https://logs.example.com"
 ```
 
-`base_url` 可以包含路径前缀，CLI 会在其后追加 `/services`、`/sellers` 或 `/{service}/_search`。`config` 不会覆盖已有文件；`EDITOR` 支持带参数的命令。
+`base_url` 可以包含路径前缀，CLI 会在其后追加 `/services`、`/sellers`、`/api/exams/...` 或 `/{service}/_search`。`config` 不会覆盖已有文件；`EDITOR` 支持带参数的命令。
 
 ## 列出服务
 
@@ -78,6 +78,32 @@ chuanshanjia sellers <SELLER> [--platform PLATFORM] [--token JWT]
 
 `--platform PLATFORM` 会额外发送 `platform=<PLATFORM>`，因此也可以和 sellerId 或 leyanSellerId 组合，把结果限定在某个平台。
 
+## 运行 exam
+
+```sh
+chuanshanjia exam mixer-config-exam <LEYAN_BUYER_ID> [--token JWT]
+```
+
+请求 `GET /api/exams/<EXAM>/<LEYAN_BUYER_ID>`，成功时输出 exam 的 JSON 结果（包含 `exam`、`leyan_buyer_id` 和 `result`）。`LEYAN_BUYER_ID` 必须是 UUID 形状，CLI 会在请求前做本地校验；服务端非 2xx 时输出状态码与响应体并以非零状态退出。
+
+例如 `mixer-config-exam` 会按买家 ID 定位卖家，返回送给 pi-core 的店铺配置：
+
+```json
+{
+  "exam": "mixer-config-exam",
+  "leyan_buyer_id": "453dca81-2094-0dd2-6342-d3394c2ab098",
+  "result": {
+    "leyan_seller_id": "6a891eee-9a0a-177a-1f06-59ee30f64941",
+    "platform": "taobao",
+    "seller_id": 3159480573,
+    "seller_nick": "芭翼旗舰店",
+    "enabled": false,
+    "executor_config": null,
+    "executor_config_canary": null
+  }
+}
+```
+
 ## 查询日志
 
 ```sh
@@ -93,6 +119,7 @@ chuanshanjia search foo \
 ```text
 chuanshanjia services [--token JWT]
 chuanshanjia sellers <SELLER> [--platform PLATFORM] [--token JWT]
+chuanshanjia exam <EXAM> <LEYAN_BUYER_ID> [--token JWT]
 chuanshanjia search <SERVICE> [-f KEY=VALUE]... [-k KEYWORDS] [--token JWT] [--start TIME] [--end TIME]
 chuanshanjia login [--issuer URL] [--client-id ID] [--redirect-uri URI] [--resource URI] [--scope SCOPES] [--no-browser]
 chuanshanjia logout [--local]
@@ -106,7 +133,7 @@ chuanshanjia config
 - 外部服务可配置预置 filter 和 keyword；这些服务端条件是否优先由服务端契约决定，CLI 不在本地合并。
 - 查询结果的具体匹配、分页、排序和字段清洗规则由外部服务及其 provider 决定。
 
-`services`、`sellers` 和 `search` 成功时输出格式化 JSON；服务返回非 2xx 时，CLI 输出状态码与响应体并以非零状态退出。输出写 stdout，`| head` 这类提前关闭管道的情况不会 panic。
+`services`、`sellers`、`exam` 和 `search` 成功时输出格式化 JSON；服务返回非 2xx 时，CLI 输出状态码与响应体并以非零状态退出。输出写 stdout，`| head` 这类提前关闭管道的情况不会 panic。
 
 ### 时间语义
 
