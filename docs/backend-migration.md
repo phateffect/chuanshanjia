@@ -265,6 +265,17 @@ HTTP 状态必须与 body 中的 `status` 一致。主要错误：
 
 上游错误有特殊透传规则，见各 provider 章节。缺少 Bearer 凭证时的 401 没有响应体，详见认证章节。
 
+### 3.5 Python 重实现的契约变更
+
+Python 重实现（chuanshanjia-server）已对 §3.1–3.2 的历史契约做如下调整，CLI 按新契约调用：
+
+- 业务端点统一挂 `/api` 前缀：`GET /api/services`、`GET /api/sellers`、`GET /api/sellers/{leyan_seller_id}`、`POST /api/services/{service}/_search`；
+- 搜索请求改为封闭扁平 schema：顶层仅允许 `env`、`version`、`level`、`host`、`trace_id`、`span_id`、`keyword`、`start`、`end`，未知字段返回 422。等值 filter 不再嵌套在 `filter` 对象里，而是直接作为顶层字段；原 `keywords` 更名为 `keyword`（子串匹配）；
+- `service` 不在请求体中，由 URL path 指定；
+- 新增跨服务追踪端点 `POST /api/services/{service}/_trace`：请求体仅允许 `trace_id`、`start`、`end`。服务端查询锚点 service 及其 `related` 声明的传递闭包，按 `ts` 稳定升序合并日志，响应在搜索响应之上增加 `sources`（每个源的 `service`、`count`、`took`、`complete`、`error`）；单个源失败不拖垮整体，失败信息记入该源的 `sources` 条目。
+
+本章以下的历史章节（§4 起）仍描述参考实现 `e8a549e` 的原语义，仅作迁移参考。
+
 ## 4. OIDC 与 JWT 认证
 
 ### 4.1 Discovery 与 JWKS

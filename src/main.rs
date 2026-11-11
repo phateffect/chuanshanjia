@@ -47,6 +47,8 @@ enum Commands {
     Sellers(SellersArgs),
     /// 查询指定的后端 service。
     Search(SearchArgs),
+    /// 按 trace_id 跨服务追踪指定 service 及其上下游。
+    Trace(TraceArgs),
     /// 通过 OIDC issuer 登录并保存 token。
     Login(LoginArgs),
     /// 登出：在 IdP 吐销 token 并删除本地凭证。
@@ -123,7 +125,28 @@ struct SearchArgs {
 
     /// 全文关键词；最多出现一次。
     #[usage(short = 'k', long, group = "query")]
-    keywords: Option<String>,
+    keyword: Option<String>,
+
+    /// Bearer JWT；覆盖配置文件中的 token。
+    #[usage(long)]
+    token: Option<String>,
+
+    /// 开始时间：带时区的 ISO 8601、本地（+08:00）时间或 epoch 秒。
+    #[usage(long, default_fn = default_start, default_note = "今天 00:00:00 +08:00")]
+    start: Timestamp,
+
+    /// 结束时间：带时区的 ISO 8601、本地（+08:00）时间或 epoch 秒。
+    #[usage(long, default_fn = default_end, default_note = "当前时间")]
+    end: Timestamp,
+}
+
+#[derive(Args)]
+struct TraceArgs {
+    /// 要追踪的锚点 service 名称；服务端会连同其声明的 related 服务一起查询。
+    service: String,
+
+    /// 跨服务追踪的 trace_id。
+    trace_id: String,
 
     /// Bearer JWT；覆盖配置文件中的 token。
     #[usage(long)]
@@ -427,7 +450,11 @@ fn backend_url(base_url: &str, path: &[&str]) -> Result<reqwest::Url> {
 }
 
 fn search_url(base_url: &str, service: &str) -> Result<reqwest::Url> {
-    backend_url(base_url, &[service, "_search"])
+    backend_url(base_url, &["api", "services", service, "_search"])
+}
+
+fn trace_url(base_url: &str, service: &str) -> Result<reqwest::Url> {
+    backend_url(base_url, &["api", "services", service, "_trace"])
 }
 
 fn http_client(url: &reqwest::Url) -> Result<reqwest::blocking::Client> {
@@ -507,7 +534,7 @@ fn seller_query(seller: &str, platform: Option<&str>) -> Result<Vec<(&'static st
 fn services(args: ServicesArgs) -> Result<()> {
     let path = config_path()?;
     let config = read_config(&path)?;
-    let url = backend_url(&config.base_url, &["services"])
+    let url = backend_url(&config.base_url, &["api", "services"])
         .with_context(|| format!("配置文件 {} 中的 base_url 无效", path.display()))?;
     let token = resolve_token(args.token, &config)?;
     print_json(&http_get(&url, token, "services")?)
@@ -517,11 +544,37 @@ fn sellers(args: SellersArgs) -> Result<()> {
     let params = seller_query(&args.seller, args.platform.as_deref())?;
     let path = config_path()?;
     let config = read_config(&path)?;
-    let mut url = backend_url(&config.base_url, &["sellers"])
+    let mut url = backend_url(&config.base_url, &["api", "sellers"])
         .with_context(|| format!("配置文件 {} 中的 base_url 无效", path.display()))?;
     let token = resolve_token(args.token, &config)?;
     url.query_pairs_mut().extend_pairs(params);
     print_json(&http_get(&url, token, "sellers")?)
+}
+
+fn http_post_json(
+    url: &reqwest::Url,
+    token: Option<String>,
+    body: &serde_json::Value,
+    label: &str,
+) -> Result<String> {
+    let client = http_client(url)?;
+    let request = client.post(url.clone()).json(body);
+    let request = match token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    };
+    let response = request
+        .send()
+        .with_context(|| format!("POST 请求 {url} 失败"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .with_context(|| format!("读取响应失败：{url}"))?;
+    ensure!(
+        status.is_success(),
+        "{label} 请求失败，HTTP {status}：{body}"
+    );
+    Ok(body)
 }
 
 fn search(args: SearchArgs) -> Result<()> {
@@ -538,33 +591,37 @@ fn search(args: SearchArgs) -> Result<()> {
         .map(|filter| (filter.key, filter.value))
         .collect::<BTreeMap<_, _>>();
     let mut body = serde_json::Map::new();
-    body.insert("filter".to_owned(), serde_json::json!(filter));
-    if let Some(keywords) = args.keywords {
-        body.insert("keywords".to_owned(), keywords.into());
+    for (key, value) in filter {
+        body.insert(key, value.into());
+    }
+    if let Some(keyword) = args.keyword {
+        body.insert("keyword".to_owned(), keyword.into());
     }
     body.insert("start".to_owned(), args.start.0.into());
     body.insert("end".to_owned(), args.end.0.into());
     let body = serde_json::Value::Object(body);
 
-    let client = http_client(&url)?;
-    let request = client.post(url.clone()).json(&body);
-    let request = match token {
-        Some(token) => request.bearer_auth(token),
-        None => request,
-    };
-    let response = request
-        .send()
-        .with_context(|| format!("POST 请求 {url} 失败"))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .with_context(|| format!("读取响应失败：{url}"))?;
-    ensure!(
-        status.is_success(),
-        "search 请求失败，HTTP {status}：{body}"
-    );
+    let response = http_post_json(&url, token, &body, "search")?;
+    print_json(&response)
+}
 
-    print_json(&body)
+fn trace(args: TraceArgs) -> Result<()> {
+    ensure!(args.start.0 < args.end.0, "start 必须早于 end");
+    ensure!(!args.trace_id.trim().is_empty(), "trace_id 不能为空");
+
+    let path = config_path()?;
+    let config = read_config(&path)?;
+    let url = trace_url(&config.base_url, &args.service)
+        .with_context(|| format!("配置文件 {} 中的 base_url 无效", path.display()))?;
+    let token = resolve_token(args.token, &config)?;
+    let body = serde_json::json!({
+        "trace_id": args.trace_id,
+        "start": args.start.0,
+        "end": args.end.0,
+    });
+
+    let response = http_post_json(&url, token, &body, "trace")?;
+    print_json(&response)
 }
 
 fn run() -> Result<()> {
@@ -572,6 +629,7 @@ fn run() -> Result<()> {
         Commands::Services(args) => services(args),
         Commands::Sellers(args) => sellers(args),
         Commands::Search(args) => search(args),
+        Commands::Trace(args) => trace(args),
         Commands::Login(args) => login(args),
         Commands::Logout(args) => logout(args),
         Commands::Config => edit_config(),
@@ -632,7 +690,7 @@ mod tests {
         assert!(args.start.0 == earliest_start || args.start.0 == latest_start);
         assert!((before..=after).contains(&args.end.0));
         assert_eq!(args.service, "foo");
-        assert_eq!(args.keywords.as_deref(), Some("timeout"));
+        assert_eq!(args.keyword.as_deref(), Some("timeout"));
     }
 
     #[test]

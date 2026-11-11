@@ -31,7 +31,7 @@ fn search_cmd(home: &TempDir) -> Command {
     command.args([
         "search",
         "foo",
-        "--keywords",
+        "--keyword",
         "timeout",
         "--start",
         "1",
@@ -46,7 +46,7 @@ fn search(home: &TempDir) -> Command {
     command.args([
         "search",
         "foo",
-        "--keywords",
+        "--keyword",
         "timeout",
         "--start",
         "1",
@@ -143,7 +143,7 @@ fn services_lists_backend_services_with_bearer_token() {
         {"name": "example", "description": "Example log service"}
     ]);
     let request = server
-        .mock("GET", "/services")
+        .mock("GET", "/api/services")
         .match_header("authorization", "Bearer cli-token")
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -177,7 +177,7 @@ fn sellers_looks_up_a_seller_nick_with_platform() {
         }
     ]);
     let request = server
-        .mock("GET", "/sellers")
+        .mock("GET", "/api/sellers")
         .match_header("authorization", "Bearer cli-token")
         .match_query(Matcher::AllOf(vec![
             Matcher::UrlEncoded("platform".into(), "taobao".into()),
@@ -212,7 +212,7 @@ fn sellers_looks_up_a_seller_nick_with_platform() {
 fn sellers_uses_seller_id_for_digits_and_leyan_seller_id_for_uuids() {
     let mut server = Server::new();
     let numeric = server
-        .mock("GET", "/sellers")
+        .mock("GET", "/api/sellers")
         .match_query(Matcher::Exact("platform=taobao&seller_id=123456".into()))
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -221,7 +221,7 @@ fn sellers_uses_seller_id_for_digits_and_leyan_seller_id_for_uuids() {
         .create();
     let leyan_seller_id = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
     let uuid = server
-        .mock("GET", "/sellers")
+        .mock("GET", "/api/sellers")
         .match_query(Matcher::Exact(format!("leyan_seller_id={leyan_seller_id}")))
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -259,7 +259,7 @@ fn sellers_requires_platform_for_a_seller_nick() {
 }
 
 #[test]
-fn search_sends_filters_keywords_and_time_range() {
+fn search_sends_filters_keyword_and_time_range() {
     let start = chrono::DateTime::parse_from_rfc3339("2026-10-14T02:01:02Z")
         .unwrap()
         .timestamp();
@@ -269,11 +269,12 @@ fn search_sends_filters_keywords_and_time_range() {
     });
     let mut server = Server::new();
     let request = server
-        .mock("POST", "/foo/_search")
+        .mock("POST", "/api/services/foo/_search")
         .match_header("content-type", "application/json")
         .match_body(Matcher::Json(json!({
-            "filter": {"filterA": "aValue", "filterB": "bValue"},
-            "keywords": "someKeyword",
+            "filterA": "aValue",
+            "filterB": "bValue",
+            "keyword": "someKeyword",
             "start": start,
             "end": end
         })))
@@ -312,14 +313,14 @@ fn search_sends_filters_keywords_and_time_range() {
 fn search_sends_config_token_and_cli_override() {
     let mut server = Server::new();
     let config_request = server
-        .mock("POST", "/foo/_search")
+        .mock("POST", "/api/services/foo/_search")
         .match_header("authorization", "Bearer config-token")
         .with_status(200)
         .with_body("{}")
         .expect(1)
         .create();
     let override_request = server
-        .mock("POST", "/foo/_search")
+        .mock("POST", "/api/services/foo/_search")
         .match_header("authorization", "Bearer cli-token")
         .with_status(200)
         .with_body("{}")
@@ -364,7 +365,7 @@ fn search_sends_config_token_and_cli_override() {
 fn search_rejects_server_errors() {
     let mut server = Server::new();
     let request = server
-        .mock("POST", "/foo/_search")
+        .mock("POST", "/api/services/foo/_search")
         .with_status(404)
         .with_header("content-type", "application/json")
         .with_body(json!({"error": {"reason": "missing service"}}).to_string())
@@ -396,7 +397,7 @@ fn search_requires_service() {
 }
 
 #[test]
-fn search_requires_filter_or_keywords() {
+fn search_requires_filter_or_keyword() {
     let home = TempDir::new().expect("temporary home should be created");
 
     let assert = chuanshanjia(&home)
@@ -405,11 +406,11 @@ fn search_requires_filter_or_keywords() {
         .failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(stderr.contains("--filter"), "unexpected stderr: {stderr}");
-    assert!(stderr.contains("--keywords"), "unexpected stderr: {stderr}");
+    assert!(stderr.contains("--keyword"), "unexpected stderr: {stderr}");
 }
 
 #[test]
-fn search_rejects_repeated_keywords() {
+fn search_rejects_repeated_keyword() {
     let home = TempDir::new().expect("temporary home should be created");
 
     let assert = chuanshanjia(&home)
@@ -462,6 +463,104 @@ fn search_rejects_invalid_or_reversed_time() {
         stderr.contains("start 必须早于 end"),
         "unexpected stderr: {stderr}"
     );
+}
+
+#[test]
+fn trace_sends_trace_id_and_time_range() {
+    let start = chrono::DateTime::parse_from_rfc3339("2026-10-14T02:01:02Z")
+        .unwrap()
+        .timestamp();
+    let end = 1792994561;
+    let response = json!({
+        "took": 12,
+        "count": 1,
+        "complete": true,
+        "sources": [{"service": "foo", "count": 1, "complete": true}],
+        "logs": [{"ts": 1792994000000i64, "body": "found"}]
+    });
+    let mut server = Server::new();
+    let request = server
+        .mock("POST", "/api/services/foo/_trace")
+        .match_header("content-type", "application/json")
+        .match_header("authorization", "Bearer cli-token")
+        .match_body(Matcher::Json(json!({
+            "trace_id": "trace-1",
+            "start": start,
+            "end": end
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(response.to_string())
+        .expect(1)
+        .create();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    let assert = chuanshanjia(&home)
+        .args([
+            "trace",
+            "foo",
+            "trace-1",
+            "--token",
+            "cli-token",
+            "--start",
+            "2026-10-14 10:01:02",
+            "--end",
+            "1792994561",
+        ])
+        .assert()
+        .success();
+
+    request.assert();
+    let output: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(output, response);
+}
+
+#[test]
+fn trace_rejects_reversed_time_and_reports_server_errors() {
+    let home = TempDir::new().expect("temporary home should be created");
+
+    let assert = chuanshanjia(&home)
+        .args(["trace", "foo", "trace-1", "--start", "2", "--end", "1"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("start 必须早于 end"),
+        "unexpected stderr: {stderr}"
+    );
+
+    let mut server = Server::new();
+    let request = server
+        .mock("POST", "/api/services/foo/_trace")
+        .with_status(404)
+        .with_header("content-type", "application/json")
+        .with_body(json!({"detail": "Unknown service 'foo'"}).to_string())
+        .expect(1)
+        .create();
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    let assert = chuanshanjia(&home)
+        .args([
+            "trace",
+            "foo",
+            "trace-1",
+            "--start",
+            "1",
+            "--end",
+            "2",
+            "--token",
+            "cli-token",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(stderr.contains("404"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("Unknown service"),
+        "unexpected stderr: {stderr}"
+    );
+    request.assert();
 }
 
 #[test]
@@ -814,7 +913,7 @@ fn search_refreshes_an_expired_session() {
         .create();
     let mut backend = Server::new();
     let search = backend
-        .mock("POST", "/foo/_search")
+        .mock("POST", "/api/services/foo/_search")
         .match_header("authorization", "Bearer x.y.z")
         .with_status(200)
         .with_body("{}")
