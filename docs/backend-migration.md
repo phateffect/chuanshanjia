@@ -687,4 +687,4 @@ providers/tls.py        查询、签名、分页、响应与错误转换
 - ES filter 字段不自动映射 `.keyword`，全文和等值匹配最终取决于上游索引；
 - `ignores` 不支持数组元素，`lookups` 没有运行时行为；
 - 认证仅支持 EdDSA/Ed25519 + issuer/audience 校验，不存在本地 JWKS 文件模式；
-- CLI naive 时间固定按 UTC+8 解释是客户端行为，Python 服务端收到的始终已是 epoch seconds。
+- CLI 的 `YYYY-MM-DD` 固定按 UTC+8 解释是客户端行为，Python 服务端收到的始终已是 epoch seconds。
