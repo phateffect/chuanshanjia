@@ -54,7 +54,7 @@ client_id = "chuanshanjia"
 resource = "https://logs.example.com"
 ```
 
-`base_url` 可以包含路径前缀，CLI 会在其后追加 `/services`、`/sellers` 或 `/{service}/_search`。`config` 不会覆盖已有文件；`EDITOR` 支持带参数的命令。
+`base_url` 可以包含路径前缀，CLI 会在其后追加 `/api/services`、`/api/sellers`、`/api/services/{service}/_search` 或 `/api/services/{service}/_trace`。`config` 不会覆盖已有文件；`EDITOR` 支持带参数的命令。
 
 ## 列出服务
 
@@ -62,7 +62,7 @@ resource = "https://logs.example.com"
 chuanshanjia services [--token JWT]
 ```
 
-请求 `GET /services`，成功时输出按名称排序的服务 JSON 数组，每项包含 `name` 和 `description`。
+请求 `GET /api/services`，成功时输出按名称排序的服务 JSON 数组，每项包含 `name` 和 `description`。
 
 ## 查询卖家
 
@@ -70,7 +70,7 @@ chuanshanjia services [--token JWT]
 chuanshanjia sellers <SELLER> [--platform PLATFORM] [--token JWT]
 ```
 
-请求 `GET /sellers`，成功时输出卖家 JSON 数组，每项包含 `leyan_seller_id`、`platform`、`seller_id`、`seller_nick`、`store_title` 和 `enabled`（由服务端按 `organization_id,platform,seller_id` 排序）。`SELLER` 按形状自动识别：
+请求 `GET /api/sellers`，成功时输出卖家 JSON 数组，每项包含 `leyan_seller_id`、`platform`、`seller_id`、`seller_nick`、`store_title` 和 `enabled`（由服务端按 `organization_id,platform,seller_id` 排序）。`SELLER` 按形状自动识别：
 
 - 纯 ASCII 数字（sellerId 或 storeId）：发送 `seller_id=<SELLER>`；
 - UUID 形状（leyanSellerId）：发送 `leyan_seller_id=<SELLER>`；
@@ -93,7 +93,8 @@ chuanshanjia search foo \
 ```text
 chuanshanjia services [--token JWT]
 chuanshanjia sellers <SELLER> [--platform PLATFORM] [--token JWT]
-chuanshanjia search <SERVICE> [-f KEY=VALUE]... [-k KEYWORDS] [--token JWT] [--start TIME] [--end TIME]
+chuanshanjia search <SERVICE> [-f KEY=VALUE]... [-k KEYWORD] [--token JWT] [--start TIME] [--end TIME]
+chuanshanjia trace <SERVICE> <TRACE_ID> [--token JWT] [--start TIME] [--end TIME]
 chuanshanjia login [--issuer URL] [--client-id ID] [--redirect-uri URI] [--resource URI] [--scope SCOPES] [--no-browser]
 chuanshanjia logout [--local]
 chuanshanjia config
@@ -101,12 +102,12 @@ chuanshanjia config
 
 - `SERVICE` 必填，对应外部服务中的 service 名称。
 - `-f, --filter KEY=VALUE` 可重复，key 不能为空，value 按字符串处理。
-- `-k, --keywords KEYWORDS` 最多出现一次；`-f` 和 `-k` 至少提供一个。
+- `-k, --keyword KEYWORD` 最多出现一次；`-f` 和 `-k` 至少提供一个。
 - `--token JWT` 可选，覆盖本地登录会话和配置文件中的 `token`，并以 `Authorization: Bearer <JWT>` 发送。
 - 外部服务可配置预置 filter 和 keyword；这些服务端条件是否优先由服务端契约决定，CLI 不在本地合并。
 - 查询结果的具体匹配、分页、排序和字段清洗规则由外部服务及其 provider 决定。
 
-`services`、`sellers` 和 `search` 成功时输出格式化 JSON；服务返回非 2xx 时，CLI 输出状态码与响应体并以非零状态退出。输出写 stdout，`| head` 这类提前关闭管道的情况不会 panic。
+`services`、`sellers`、`search` 和 `trace` 成功时输出格式化 JSON；服务返回非 2xx 时，CLI 输出状态码与响应体并以非零状态退出。输出写 stdout，`| head` 这类提前关闭管道的情况不会 panic。
 
 ### 时间语义
 
@@ -117,6 +118,14 @@ chuanshanjia config
 3. Epoch seconds，如 `1792994561`。
 
 CLI 将时间统一转换为 epoch seconds，按 `[start, end)` 请求服务。对 `localhost`、`127.0.0.1`、`::1` 目标自动绕过系统代理。
+
+## 跨服务追踪
+
+```sh
+chuanshanjia trace kt-mixer-taobao 84096828bfc209f708187f4be5a793de
+```
+
+请求 `POST /api/services/{SERVICE}/_trace`，发送 `trace_id`、`start` 和 `end`，时间语义与 `search` 相同。服务端会把锚点 service 及其声明的 related 服务（传递闭包）并行查询，按时间排序合并后返回：响应在搜索响应之上增加 `sources`，记录每个源的服务名、条数、耗时与失败原因；单个源查询失败不会拖垮整体。
 
 ## OIDC 登录与登出
 
@@ -141,17 +150,18 @@ chuanshanjia logout --local        # 只删除本地 token
 
 token 保存在 `~/.config/chuanshanjia/credentials.toml`，Unix 下权限为 `0600`，不与手写的 `config.toml` 混合。
 
-`services`、`sellers` 和 `search` 的 token 优先级为 `--token` > 本地登录会话 > 配置文件 `token`。会话进入过期窗口时先用 refresh token 静默续期并回写文件，续期失败则提示重新 `login`。过期时间优先使用 IdP 返回的 `expires_in`；授权码兑换未返回该字段时，退回按 access token 的 JWT `exp` 判断。
+`services`、`sellers`、`search` 和 `trace` 的 token 优先级为 `--token` > 本地登录会话 > 配置文件 `token`。会话进入过期窗口时先用 refresh token 静默续期并回写文件，续期失败则提示重新 `login`。过期时间优先使用 IdP 返回的 `expires_in`；授权码兑换未返回该字段时，退回按 access token 的 JWT `exp` 判断。
 
 `logout` 默认先按 RFC 7009 使用 refresh token 调 IdP 的 revocation endpoint，再删除本地凭证。IdP 不可达时只打印警告，仍删除本地文件，保证离线也能登出。
 
 ## 外部 HTTP 服务
 
-CLI 依赖三个受 Bearer token 保护的服务端接口：
+CLI 依赖四个受 Bearer token 保护的服务端接口：
 
-- `GET /services`：列出服务名称与说明；
-- `GET /sellers`：按 sellerNick、sellerId/storeId 或 leyanSellerId 查卖家，可用 `platform` 限定平台；
-- `POST /{service}/_search`：发送平铺的 `filter`、`keywords`、`start`、`end` 和 Bearer token，接收 JSON 响应。
+- `GET /api/services`：列出服务名称与说明；
+- `GET /api/sellers`：按 sellerNick、sellerId/storeId 或 leyanSellerId 查卖家，可用 `platform` 限定平台；
+- `POST /api/services/{service}/_search`：发送封闭扁平 schema 的等值 filter 字段（`env`/`version`/`level`/`host`/`trace_id`/`span_id`）、`keyword`、`start`、`end` 和 Bearer token，接收 JSON 响应；
+- `POST /api/services/{service}/_trace`：发送 `trace_id`、`start`、`end`，返回 `sources` 与按时间合并后的 `logs`。
 
 原 Rust 服务端已经移出本仓库。Python 重实现所需的完整请求、响应、认证、provider 和错误契约见 [docs/backend-migration.md](docs/backend-migration.md)。
 

@@ -9,6 +9,7 @@
 - 用 `chuanshanjia services` 列出后端支持的服务；
 - 用 `chuanshanjia sellers` 按 sellerNick、sellerId、storeId 或 leyanSellerId 查卖家；
 - 用统一的 `chuanshanjia search <service> -f k=v -k kw` 表达查询；
+- 用 `chuanshanjia trace <service> <trace_id>` 做跨服务追踪；
 - 将参数、时间和 token 归一化后调用外部 HTTP 服务；
 - 将服务端 JSON 原样作为 CLI 的结构化结果输出；
 - 用标准 OIDC 流程降低手工分发和刷新 token 的成本。
@@ -23,11 +24,12 @@
 ## 2. 总体架构
 
 ```text
-┌──────────────┐   GET /services              ┌────────────────────┐
-│ chuanshanjia │   GET /sellers               │ 外部 HTTP 查询服务 │
-│ CLI          │   POST /{service}/_search    │ （其他项目实现）   │
-│              │ ───────────────────────────▶ │                    │
-└──────────────┘   Authorization: Bearer JWT  └────────────────────┘
+┌──────────────┐   GET /api/services               ┌────────────────────┐
+│ chuanshanjia │   GET /api/sellers                │ 外部 HTTP 查询服务 │
+│ CLI          │   POST /api/services/{s}/_search  │ （其他项目实现）   │
+│              │   POST /api/services/{s}/_trace   │                    │
+│              │ ────────────────────────────▶ │                    │
+└──────────────┘   Authorization: Bearer JWT       └────────────────────┘
        │
        ▼
 ~/.config/chuanshanjia/
@@ -51,16 +53,18 @@
 
 ### 3.1 CLI 查询模型
 
-CLI 保留最小查询模型：service、可重复的等值 filter、单个 keywords 和时间范围。
+CLI 保留最小查询模型：service、可重复的等值 filter、单个 keyword 和时间范围。
 
 - `-f KEY=VALUE` 在第一个 `=` 分割，key 不能为空，value 始终按字符串发送；
-- `-f` 与 `-k` 至少一个，keywords 最多出现一次；
-- 请求体为平铺的 `{"filter":...,"keywords":...,"start":...,"end":...}`；
+- `-f` 与 `-k` 至少一个，keyword 最多出现一次；
+- 请求体是封闭扁平 schema：等值 filter 键（`env`/`version`/`level`/`host`/`trace_id`/`span_id`）作为顶层字段发送，另加 `keyword`、`start`、`end`；未知字段由服务端返回 422 拒绝；
 - CLI 不在本地执行 service 预置合并、provider 查询或响应清洗，这些都是外部服务的职责。
 
-卖家查询是独立的只读命令：`sellers <SELLER> [--platform PLATFORM]` 只把参数形状映射成 `/sellers` 的查询参数，不在本地做模糊匹配或结果过滤。纯 ASCII 数字视为 sellerId/storeId（`seller_id`），UUID 形状视为 leyanSellerId（`leyan_seller_id`），其他视为 sellerNick（`seller_nick`，此时 `--platform` 必填），`--platform` 对前两种形状作为附加约束发送。
+卖家查询是独立的只读命令：`sellers <SELLER> [--platform PLATFORM]` 只把参数形状映射成 `/api/sellers` 的查询参数，不在本地做模糊匹配或结果过滤。纯 ASCII 数字视为 sellerId/storeId（`seller_id`），UUID 形状视为 leyanSellerId（`leyan_seller_id`），其他视为 sellerNick（`seller_nick`，此时 `--platform` 必填），`--platform` 对前两种形状作为附加约束发送。
 
 服务端契约仍要求预置 filters/keyword 优先，但该安全语义由服务端测试保证，不能再由纯 CLI 仓库的测试代替。
+
+跨服务追踪是独立的只读命令：`trace <SERVICE> <TRACE_ID>` 生成 `POST /api/services/{service}/_trace` 请求体 `{"trace_id","start","end"}`。related 扇出、并行查询与按时间升序合并都是服务端职责，CLI 只透传响应。
 
 ### 3.2 时间与 URL
 
@@ -68,11 +72,11 @@ CLI 保留最小查询模型：service、可重复的等值 filter、单个 keyw
 
 默认区间是 UTC+8 当天零点到当前时刻；要求 `start < end`，对外语义为 `[start, end)`。
 
-`base_url` 必须是 HTTP(S) URL。CLI 保留其已有路径前缀；服务列表追加 `services`，卖家查询追加 `sellers`，查询追加 service 和 `_search` 两个 URL segment，不自行实现 provider 路由。
+`base_url` 必须是 HTTP(S) URL。CLI 保留其已有路径前缀；业务端点统一位于 `api` 下：服务列表追加 `api/services`，卖家查询追加 `api/sellers`，查询与追踪追加 `api/services`、service 与 `_search`/`_trace` URL segment，不自行实现 provider 路由。
 
 ### 3.3 HTTP、输出与错误
 
-- 服务列表、卖家查询和搜索使用 reqwest blocking client，CLI 自身没有运行时服务和后台状态；
+- 服务列表、卖家查询、搜索和追踪使用 reqwest blocking client，CLI 自身没有运行时服务和后台状态；
 - 卖家参数作为 URL query 发送（`seller_id`、`leyan_seller_id`、`seller_nick` 与 `platform`），由服务端完成互斥校验；
 - token 以 `Authorization: Bearer <JWT>` 发送；
 - localhost、127.0.0.1、::1 自动禁用系统代理，避免企业代理拦截本机请求；
@@ -96,7 +100,7 @@ CLI 不负责把服务端错误转换成另一套模型，因此 Python 重实�
 - 不保存 client_secret，不将凭证内容写入日志；
 - `logout` 只需删除该文件即可清理本地会话。
 
-服务列表、卖家查询和搜索的 token 优先级为 `--token` > 本地登录会话 > 配置文件静态 token。显式参数优先便于一次性覆盖，本地会话优先于静态配置则避免过期配置遮蔽自动续期结果。
+服务列表、卖家查询、搜索和追踪的 token 优先级为 `--token` > 本地登录会话 > 配置文件静态 token。显式参数优先便于一次性覆盖，本地会话优先于静态配置则避免过期配置遮蔽自动续期结果。
 
 ## 5. OIDC 设计
 
