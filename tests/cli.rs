@@ -604,6 +604,216 @@ fn trace_rejects_reversed_time_and_reports_server_errors() {
 }
 
 #[test]
+fn workflow_seller_exam_sends_seller_id_and_bearer_token() {
+    let seller_id = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+    let response = json!({
+        "leyan_seller_id": seller_id,
+        "platform": "taobao",
+        "seller_id": 123,
+        "seller_nick": "shop",
+        "enabled": true,
+        "access_token": true
+    });
+    let mut server = Server::new();
+    let request = server
+        .mock("POST", "/api/workflows/seller-exam")
+        .match_header("content-type", "application/json")
+        .match_header("authorization", "Bearer cli-token")
+        .match_body(Matcher::Json(json!({"leyan_seller_id": seller_id})))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(response.to_string())
+        .expect(1)
+        .create();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(
+        &home,
+        &format!(
+            "base_url = \"{}\"\ntoken = \"config-token\"\n",
+            server.url()
+        ),
+    );
+
+    let assert = chuanshanjia(&home)
+        .args(["workflow", "seller-exam", seller_id, "--token", "cli-token"])
+        .assert()
+        .success();
+
+    request.assert();
+    let output: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(output, response);
+}
+
+#[test]
+fn workflow_message_id_sends_payload_and_derives_end_from_start() {
+    let start = chrono::DateTime::parse_from_rfc3339("2026-10-14T02:01:02Z")
+        .unwrap()
+        .timestamp();
+    let end = chrono::DateTime::parse_from_rfc3339("2026-10-14T16:00:00Z")
+        .unwrap()
+        .timestamp();
+    let response = json!({
+        "trace_id": "trace-1",
+        "took": 12,
+        "count": 1,
+        "complete": true,
+        "sources": [{"service": "kt-mixer-taobao", "count": 1, "complete": true}],
+        "logs": [{"ts": 1792994000000i64, "body": "found", "trace_id": "trace-1"}]
+    });
+    let mut server = Server::new();
+    let request = server
+        .mock("POST", "/api/workflows/message-id")
+        .match_header("content-type", "application/json")
+        .match_header("authorization", "Bearer config-token")
+        .match_body(Matcher::Json(json!({
+            "platform": "taobao",
+            "message_id": "msg-1",
+            "start": start,
+            "end": end
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(response.to_string())
+        .expect(1)
+        .create();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(
+        &home,
+        &format!(
+            "base_url = \"{}\"\ntoken = \"config-token\"\n",
+            server.url()
+        ),
+    );
+
+    let assert = chuanshanjia(&home)
+        .args([
+            "workflow",
+            "message-id",
+            "--platform",
+            "taobao",
+            "--message-id",
+            "msg-1",
+            "--start",
+            "2026-10-14T10:01:02+08",
+        ])
+        .assert()
+        .success();
+
+    request.assert();
+    let output: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(output, response);
+}
+
+#[test]
+fn workflow_requires_subcommand_and_specific_arguments() {
+    let home = TempDir::new().expect("temporary home should be created");
+
+    chuanshanjia(&home).arg("workflow").assert().failure();
+
+    let assert = chuanshanjia(&home)
+        .args(["workflow", "seller-exam"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("LEYAN_SELLER_ID"),
+        "unexpected stderr: {stderr}"
+    );
+
+    let assert = chuanshanjia(&home)
+        .args(["workflow", "message-id"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(stderr.contains("--platform"), "unexpected stderr: {stderr}");
+
+    let assert = chuanshanjia(&home)
+        .args(["workflow", "message-id", "--platform", "taobao"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("--message-id"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn workflow_message_id_rejects_reversed_time_before_reading_config() {
+    let home = TempDir::new().expect("temporary home should be created");
+
+    let assert = chuanshanjia(&home)
+        .args([
+            "workflow",
+            "message-id",
+            "--platform",
+            "taobao",
+            "--message-id",
+            "msg-1",
+            "--start",
+            "2",
+            "--end",
+            "1",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("start 必须早于 end"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn workflow_reports_server_errors() {
+    for (name, args, status, detail) in [
+        (
+            "seller-exam",
+            vec!["3fa85f64-5717-4562-b3fc-2c963f66afa6"],
+            404,
+            "Seller not found",
+        ),
+        (
+            "message-id",
+            vec![
+                "--platform",
+                "taobao",
+                "--message-id",
+                "msg-1",
+                "--start",
+                "1",
+                "--end",
+                "2",
+            ],
+            422,
+            "message_id matched multiple traces",
+        ),
+    ] {
+        let mut server = Server::new();
+        let request = server
+            .mock("POST", format!("/api/workflows/{name}").as_str())
+            .with_status(status)
+            .with_header("content-type", "application/json")
+            .with_body(json!({"detail": detail}).to_string())
+            .expect(1)
+            .create();
+        let home = TempDir::new().expect("temporary home should be created");
+        write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+        let mut command = chuanshanjia(&home);
+        command.args(["workflow", name]).args(args);
+        let assert = command.assert().failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+        assert!(
+            stderr.contains(status.to_string().as_str()),
+            "unexpected stderr: {stderr}"
+        );
+        assert!(stderr.contains(detail), "unexpected stderr: {stderr}");
+        request.assert();
+    }
+}
+
+#[test]
 fn missing_config_fails_with_a_clear_error() {
     let home = TempDir::new().expect("temporary home should be created");
 

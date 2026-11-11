@@ -49,6 +49,8 @@ enum Commands {
     Search(SearchArgs),
     /// 按 trace_id 跨服务追踪指定 service 及其上下游。
     Trace(TraceArgs),
+    /// 执行后端注册的复合 workflow。
+    Workflow(WorkflowArgs),
     /// 通过 OIDC issuer 登录并保存 token。
     Login(LoginArgs),
     /// 登出：在 IdP 吐销 token 并删除本地凭证。
@@ -147,6 +149,53 @@ struct TraceArgs {
 
     /// 跨服务追踪的 trace_id。
     trace_id: String,
+
+    /// Bearer JWT；覆盖配置文件中的 token。
+    #[usage(long)]
+    token: Option<String>,
+
+    /// 开始时间：YYYY-MM-DD（+08:00）、带时区的 ISO 8601 或 epoch 秒；默认为当天零点。
+    #[usage(long)]
+    start: Option<Timestamp>,
+
+    /// 结束时间：格式同 start；仅传 start 时取下一日界，都省略时取当前时间。
+    #[usage(long)]
+    end: Option<Timestamp>,
+}
+
+#[derive(Args)]
+struct WorkflowArgs {
+    #[usage(subcommand)]
+    command: WorkflowCommands,
+}
+
+#[derive(Subcommands)]
+enum WorkflowCommands {
+    /// 按 leyan_seller_id 聚合 Mixer 和 Dealer 的卖家信息。
+    SellerExam(SellerExamArgs),
+    /// 按消息 ID 定位唯一 trace 并查询对应平台的完整链路日志。
+    MessageId(MessageIdArgs),
+}
+
+#[derive(Args)]
+struct SellerExamArgs {
+    /// 要查询的 leyan_seller_id。
+    leyan_seller_id: String,
+
+    /// Bearer JWT；覆盖配置文件中的 token。
+    #[usage(long)]
+    token: Option<String>,
+}
+
+#[derive(Args)]
+struct MessageIdArgs {
+    /// 消息所属平台；映射到 kt-mixer-{platform}。
+    #[usage(long)]
+    platform: String,
+
+    /// 要定位的消息 ID。
+    #[usage(long)]
+    message_id: String,
 
     /// Bearer JWT；覆盖配置文件中的 token。
     #[usage(long)]
@@ -650,12 +699,58 @@ fn trace(args: TraceArgs) -> Result<()> {
     print_json(&response)
 }
 
+fn workflow(args: WorkflowArgs) -> Result<()> {
+    match args.command {
+        WorkflowCommands::SellerExam(args) => seller_exam(args),
+        WorkflowCommands::MessageId(args) => message_id(args),
+    }
+}
+
+fn seller_exam(args: SellerExamArgs) -> Result<()> {
+    ensure!(
+        !args.leyan_seller_id.trim().is_empty(),
+        "leyan_seller_id 不能为空"
+    );
+    run_workflow(
+        "seller-exam",
+        args.token,
+        serde_json::json!({"leyan_seller_id": args.leyan_seller_id}),
+    )
+}
+
+fn message_id(args: MessageIdArgs) -> Result<()> {
+    let (start, end) = resolve_time_range(args.start, args.end)?;
+    ensure!(!args.platform.trim().is_empty(), "platform 不能为空");
+    ensure!(!args.message_id.trim().is_empty(), "message_id 不能为空");
+    run_workflow(
+        "message-id",
+        args.token,
+        serde_json::json!({
+            "platform": args.platform,
+            "message_id": args.message_id,
+            "start": start.0,
+            "end": end.0,
+        }),
+    )
+}
+
+fn run_workflow(name: &str, token: Option<String>, body: serde_json::Value) -> Result<()> {
+    let path = config_path()?;
+    let config = read_config(&path)?;
+    let url = backend_url(&config.base_url, &["api", "workflows", name])
+        .with_context(|| format!("配置文件 {} 中的 base_url 无效", path.display()))?;
+    let token = resolve_token(token, &config)?;
+    let response = http_post_json(&url, token, &body, &format!("workflow {name}"))?;
+    print_json(&response)
+}
+
 fn run() -> Result<()> {
     match Chuanshanjia::parse().command {
         Commands::Services(args) => services(args),
         Commands::Sellers(args) => sellers(args),
         Commands::Search(args) => search(args),
         Commands::Trace(args) => trace(args),
+        Commands::Workflow(args) => workflow(args),
         Commands::Login(args) => login(args),
         Commands::Logout(args) => logout(args),
         Commands::Config => edit_config(),

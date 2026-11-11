@@ -54,7 +54,7 @@ client_id = "chuanshanjia"
 resource = "https://logs.example.com"
 ```
 
-`base_url` 可以包含路径前缀，CLI 会在其后追加 `/api/services`、`/api/sellers`、`/api/services/{service}/_search` 或 `/api/services/{service}/_trace`。`config` 不会覆盖已有文件；`EDITOR` 支持带参数的命令。
+`base_url` 可以包含路径前缀，CLI 会在其后追加 `/api/services`、`/api/sellers`、`/api/services/{service}/_search`、`/api/services/{service}/_trace` 或 `/api/workflows/{workflow}`。`config` 不会覆盖已有文件；`EDITOR` 支持带参数的命令。
 
 ## 列出服务
 
@@ -95,6 +95,8 @@ chuanshanjia services [--token JWT]
 chuanshanjia sellers <SELLER> [--platform PLATFORM] [--token JWT]
 chuanshanjia search <SERVICE> [-f KEY=VALUE]... [-k KEYWORD] [--token JWT] [--start TIME] [--end TIME]
 chuanshanjia trace <SERVICE> <TRACE_ID> [--token JWT] [--start TIME] [--end TIME]
+chuanshanjia workflow seller-exam <LEYAN_SELLER_ID> [--token JWT]
+chuanshanjia workflow message-id --platform <PLATFORM> --message-id <MESSAGE_ID> [--token JWT] [--start TIME] [--end TIME]
 chuanshanjia login [--issuer URL] [--client-id ID] [--redirect-uri URI] [--resource URI] [--scope SCOPES] [--no-browser]
 chuanshanjia logout [--local]
 chuanshanjia config
@@ -107,7 +109,7 @@ chuanshanjia config
 - 外部服务可配置预置 filter 和 keyword；这些服务端条件是否优先由服务端契约决定，CLI 不在本地合并。
 - 查询结果的具体匹配、分页、排序和字段清洗规则由外部服务及其 provider 决定。
 
-`services`、`sellers`、`search` 和 `trace` 成功时输出格式化 JSON；服务返回非 2xx 时，CLI 输出状态码与响应体并以非零状态退出。输出写 stdout，`| head` 这类提前关闭管道的情况不会 panic。
+`services`、`sellers`、`search`、`trace` 和 `workflow` 成功时输出格式化 JSON；服务返回非 2xx 时，CLI 输出状态码与响应体并以非零状态退出。输出写 stdout，`| head` 这类提前关闭管道的情况不会 panic。
 
 ### 时间语义
 
@@ -128,6 +130,32 @@ chuanshanjia trace kt-mixer-taobao 84096828bfc209f708187f4be5a793de
 ```
 
 请求 `POST /api/services/{SERVICE}/_trace`，发送 `trace_id`、`start` 和 `end`，时间语义与 `search` 相同。服务端会把锚点 service 及其声明的 related 服务（传递闭包）并行查询，按时间排序合并后返回：响应在搜索响应之上增加 `sources`，记录每个源的服务名、条数、耗时与失败原因；单个源查询失败不会拖垮整体。
+
+## 执行 Workflow
+
+Workflow 是服务端注册的跨数据源复合编排。CLI 为每个支持的 workflow 提供专用子命令，只生成对应的封闭 JSON 请求体并透传响应，不在本地执行编排，也不接受通用 `PAYLOAD_JSON`。
+
+### seller-exam
+
+```sh
+chuanshanjia workflow seller-exam 3fa85f64-5717-4562-b3fc-2c963f66afa6
+```
+
+请求 `POST /api/workflows/seller-exam`，发送 `{"leyan_seller_id":"..."}`，返回 Mixer 与 Dealer 聚合的卖家详情。Mixer 无记录返回 404，未配置所需 PostgREST 返回 503，上游失败返回 502。
+
+### message-id
+
+```sh
+chuanshanjia workflow message-id \
+  --platform taobao \
+  --message-id msg-123 \
+  --start 2026-10-14 \
+  --end 1792994561
+```
+
+请求 `POST /api/workflows/message-id`，发送 `platform`、`message_id`、`start` 和 `end`。时间格式、默认区间和校验规则与 `search`、`trace` 相同。服务端先在该平台的 `kt-mixer-{platform}` 中按消息 ID 定位唯一 trace，再查询该平台及 related 服务的链路日志；响应在 trace 结果上增加 `trace_id`。
+
+未知平台或找不到 trace 返回 404；消息 ID 命中多个 trace 返回 422，可缩小时间区间后重试。CLI 保留服务端状态码与错误响应。
 
 ## OIDC 登录与登出
 
@@ -152,18 +180,20 @@ chuanshanjia logout --local        # 只删除本地 token
 
 token 保存在 `~/.config/chuanshanjia/credentials.toml`，Unix 下权限为 `0600`，不与手写的 `config.toml` 混合。
 
-`services`、`sellers`、`search` 和 `trace` 的 token 优先级为 `--token` > 本地登录会话 > 配置文件 `token`。会话进入过期窗口时先用 refresh token 静默续期并回写文件，续期失败则提示重新 `login`。过期时间优先使用 IdP 返回的 `expires_in`；授权码兑换未返回该字段时，退回按 access token 的 JWT `exp` 判断。
+`services`、`sellers`、`search`、`trace` 和 `workflow` 的 token 优先级为 `--token` > 本地登录会话 > 配置文件 `token`。会话进入过期窗口时先用 refresh token 静默续期并回写文件，续期失败则提示重新 `login`。过期时间优先使用 IdP 返回的 `expires_in`；授权码兑换未返回该字段时，退回按 access token 的 JWT `exp` 判断。
 
 `logout` 默认先按 RFC 7009 使用 refresh token 调 IdP 的 revocation endpoint，再删除本地凭证。IdP 不可达时只打印警告，仍删除本地文件，保证离线也能登出。
 
 ## 外部 HTTP 服务
 
-CLI 依赖四个受 Bearer token 保护的服务端接口：
+CLI 依赖六个受 Bearer token 保护的服务端接口：
 
 - `GET /api/services`：列出服务名称与说明；
 - `GET /api/sellers`：按 sellerNick、sellerId/storeId 或 leyanSellerId 查卖家，可用 `platform` 限定平台；
 - `POST /api/services/{service}/_search`：发送封闭扁平 schema 的等值 filter 字段（`env`/`version`/`level`/`host`/`trace_id`/`span_id`）、`keyword`、`start`、`end` 和 Bearer token，接收 JSON 响应；
-- `POST /api/services/{service}/_trace`：发送 `trace_id`、`start`、`end`，返回 `sources` 与按时间合并后的 `logs`。
+- `POST /api/services/{service}/_trace`：发送 `trace_id`、`start`、`end`，返回 `sources` 与按时间合并后的 `logs`；
+- `POST /api/workflows/seller-exam`：发送 `leyan_seller_id`，返回 Mixer 与 Dealer 聚合的卖家详情；
+- `POST /api/workflows/message-id`：发送 `platform`、`message_id`、`start`、`end`，返回定位到的 `trace_id` 及对应链路日志。
 
 原 Rust 服务端已经移出本仓库。Python 重实现所需的完整请求、响应、认证、provider 和错误契约见 [docs/backend-migration.md](docs/backend-migration.md)。
 
