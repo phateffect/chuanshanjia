@@ -7,7 +7,7 @@ use std::process::Command;
 use std::str::FromStr;
 
 use anyhow::{Context, Result, ensure};
-use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use serde::Deserialize;
 use usage_rs::{Args, Cli, Subcommands};
 
@@ -131,13 +131,13 @@ struct SearchArgs {
     #[usage(long)]
     token: Option<String>,
 
-    /// 开始时间：带时区的 ISO 8601、本地（+08:00）时间或 epoch 秒。
-    #[usage(long, default_fn = default_start, default_note = "今天 00:00:00 +08:00")]
-    start: Timestamp,
+    /// 开始时间：YYYY-MM-DD（+08:00）、带时区的 ISO 8601 或 epoch 秒；默认为当天零点。
+    #[usage(long)]
+    start: Option<Timestamp>,
 
-    /// 结束时间：带时区的 ISO 8601、本地（+08:00）时间或 epoch 秒。
-    #[usage(long, default_fn = default_end, default_note = "当前时间")]
-    end: Timestamp,
+    /// 结束时间：格式同 start；仅传 start 时取下一日界，都省略时取当前时间。
+    #[usage(long)]
+    end: Option<Timestamp>,
 }
 
 #[derive(Args)]
@@ -152,13 +152,13 @@ struct TraceArgs {
     #[usage(long)]
     token: Option<String>,
 
-    /// 开始时间：带时区的 ISO 8601、本地（+08:00）时间或 epoch 秒。
-    #[usage(long, default_fn = default_start, default_note = "今天 00:00:00 +08:00")]
-    start: Timestamp,
+    /// 开始时间：YYYY-MM-DD（+08:00）、带时区的 ISO 8601 或 epoch 秒；默认为当天零点。
+    #[usage(long)]
+    start: Option<Timestamp>,
 
-    /// 结束时间：带时区的 ISO 8601、本地（+08:00）时间或 epoch 秒。
-    #[usage(long, default_fn = default_end, default_note = "当前时间")]
-    end: Timestamp,
+    /// 结束时间：格式同 start；仅传 start 时取下一日界，都省略时取当前时间。
+    #[usage(long)]
+    end: Option<Timestamp>,
 }
 
 #[derive(Clone, Copy)]
@@ -178,18 +178,16 @@ impl FromStr for Timestamp {
             return Ok(Self(seconds));
         }
         if let Ok(datetime) = DateTime::parse_from_rfc3339(value)
-            .or_else(|_| DateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f%z"))
+            .or_else(|_| DateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f%#z"))
         {
             return Ok(Self(datetime.timestamp()));
         }
-        if let Ok(datetime) = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
-            && let Some(datetime) = datetime.and_local_timezone(local_timezone()).single()
-        {
-            return Ok(Self(datetime.timestamp()));
+        if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+            return Ok(start_of_date(date));
         }
 
         Err(format!(
-            "时间格式无效：{value:?}；请使用带时区的 ISO 8601、YYYY-MM-DD HH:mm:ss（+08:00）或 epoch 秒"
+            "时间格式无效：{value:?}；请使用 YYYY-MM-DD（+08:00）、带时区的 ISO 8601 或 epoch 秒"
         ))
     }
 }
@@ -218,9 +216,8 @@ fn local_timezone() -> FixedOffset {
     FixedOffset::east_opt(8 * 3600).expect("UTC+08:00 is a valid fixed offset")
 }
 
-fn start_of_day(now: DateTime<Utc>) -> Timestamp {
-    let today = now.with_timezone(&local_timezone()).date_naive();
-    let midnight = today
+fn start_of_date(date: NaiveDate) -> Timestamp {
+    let midnight = date
         .and_hms_opt(0, 0, 0)
         .expect("midnight is a valid local time");
     let datetime = midnight
@@ -230,12 +227,41 @@ fn start_of_day(now: DateTime<Utc>) -> Timestamp {
     Timestamp(datetime.timestamp())
 }
 
+fn start_of_day(now: DateTime<Utc>) -> Timestamp {
+    start_of_date(now.with_timezone(&local_timezone()).date_naive())
+}
+
 fn default_start() -> Timestamp {
     start_of_day(Utc::now())
 }
 
-fn default_end() -> Timestamp {
-    Timestamp(Utc::now().timestamp())
+fn next_day_start(start: Timestamp) -> Result<Timestamp> {
+    let datetime = DateTime::from_timestamp(start.0, 0)
+        .context("start 超出可计算的时间范围")?
+        .with_timezone(&local_timezone());
+    let next_date = datetime
+        .date_naive()
+        .succ_opt()
+        .context("start 超出可计算的时间范围")?;
+    Ok(start_of_date(next_date))
+}
+
+fn resolve_time_range(
+    start: Option<Timestamp>,
+    end: Option<Timestamp>,
+) -> Result<(Timestamp, Timestamp)> {
+    let (start, end) = match (start, end) {
+        (Some(start), Some(end)) => (start, end),
+        (Some(start), None) => (start, next_day_start(start)?),
+        (None, Some(end)) => (default_start(), end),
+        (None, None) => {
+            let now = Utc::now();
+            let end = Timestamp(now.timestamp());
+            (start_of_day(now), end)
+        }
+    };
+    ensure!(start.0 < end.0, "start 必须早于 end");
+    Ok((start, end))
 }
 
 #[derive(Deserialize)]
@@ -578,7 +604,7 @@ fn http_post_json(
 }
 
 fn search(args: SearchArgs) -> Result<()> {
-    ensure!(args.start.0 < args.end.0, "start 必须早于 end");
+    let (start, end) = resolve_time_range(args.start, args.end)?;
 
     let path = config_path()?;
     let config = read_config(&path)?;
@@ -597,8 +623,8 @@ fn search(args: SearchArgs) -> Result<()> {
     if let Some(keyword) = args.keyword {
         body.insert("keyword".to_owned(), keyword.into());
     }
-    body.insert("start".to_owned(), args.start.0.into());
-    body.insert("end".to_owned(), args.end.0.into());
+    body.insert("start".to_owned(), start.0.into());
+    body.insert("end".to_owned(), end.0.into());
     let body = serde_json::Value::Object(body);
 
     let response = http_post_json(&url, token, &body, "search")?;
@@ -606,7 +632,7 @@ fn search(args: SearchArgs) -> Result<()> {
 }
 
 fn trace(args: TraceArgs) -> Result<()> {
-    ensure!(args.start.0 < args.end.0, "start 必须早于 end");
+    let (start, end) = resolve_time_range(args.start, args.end)?;
     ensure!(!args.trace_id.trim().is_empty(), "trace_id 不能为空");
 
     let path = config_path()?;
@@ -616,8 +642,8 @@ fn trace(args: TraceArgs) -> Result<()> {
     let token = resolve_token(args.token, &config)?;
     let body = serde_json::json!({
         "trace_id": args.trace_id,
-        "start": args.start.0,
-        "end": args.end.0,
+        "start": start.0,
+        "end": end.0,
     });
 
     let response = http_post_json(&url, token, &body, "trace")?;
@@ -645,20 +671,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn timestamp_accepts_iso8601_local_datetime_and_epoch_seconds() {
-        let local = "2026-10-14 10:01:02".parse::<Timestamp>().unwrap();
-        let offset = "2026-10-14T10:01:02+08:00".parse::<Timestamp>().unwrap();
-        let utc = "2026-10-14T02:01:02Z".parse::<Timestamp>().unwrap();
-        let epoch = local.0.to_string().parse::<Timestamp>().unwrap();
+    fn timestamp_accepts_date_iso8601_and_epoch_seconds() {
+        let date = "2026-10-14".parse::<Timestamp>().unwrap();
+        let expected_date = DateTime::parse_from_rfc3339("2026-10-13T16:00:00Z")
+            .unwrap()
+            .timestamp();
+        assert_eq!(date.0, expected_date);
 
-        assert_eq!(local.0, offset.0);
-        assert_eq!(local.0, utc.0);
-        assert_eq!(local.0, epoch.0);
+        let expected_datetime = DateTime::parse_from_rfc3339("2026-10-14T02:01:02Z")
+            .unwrap()
+            .timestamp();
+        for value in [
+            "2026-10-14T10:01:02+08",
+            "2026-10-14T10:01:02+08:00",
+            "2026-10-14T02:01:02Z",
+            "2026-10-14T11:01:02+09:00",
+        ] {
+            assert_eq!(
+                value.parse::<Timestamp>().unwrap().0,
+                expected_datetime,
+                "parsed {value:?}"
+            );
+        }
+
+        let epoch = expected_datetime.to_string().parse::<Timestamp>().unwrap();
+        assert_eq!(epoch.0, expected_datetime);
     }
 
     #[test]
     fn timestamp_requires_a_valid_datetime_and_timezone() {
-        for value in ["", "not-a-time", "2026-10-14T10:01:02"] {
+        for value in [
+            "",
+            "not-a-time",
+            "2026-10-14T10:01:02",
+            "2026-10-14 10:01:02",
+        ] {
             assert!(value.parse::<Timestamp>().is_err(), "accepted {value:?}");
         }
     }
@@ -676,19 +723,37 @@ mod tests {
     }
 
     #[test]
+    fn explicit_start_uses_the_next_utc_plus_eight_midnight_as_end() {
+        let expected_end = DateTime::parse_from_rfc3339("2026-10-14T16:00:00Z")
+            .unwrap()
+            .timestamp();
+        for value in [
+            "2026-10-14",
+            "2026-10-14T00:00:00+08",
+            "2026-10-14T10:01:02+08",
+        ] {
+            let start = value.parse::<Timestamp>().unwrap();
+            let (actual_start, end) = resolve_time_range(Some(start), None).unwrap();
+            assert_eq!(actual_start.0, start.0);
+            assert_eq!(end.0, expected_end, "start was {value:?}");
+        }
+    }
+
+    #[test]
     fn search_arguments_use_dynamic_time_defaults() {
         let earliest_start = default_start().0;
         let before = Utc::now().timestamp();
         let argv = ["search", "foo", "-k", "timeout"].map(std::ffi::OsStr::new);
         let cli = Chuanshanjia::parse_from(&argv).unwrap();
-        let after = Utc::now().timestamp();
-        let latest_start = default_start().0;
         let Commands::Search(args) = cli.command else {
             panic!("expected search command");
         };
+        let (start, end) = resolve_time_range(args.start, args.end).unwrap();
+        let after = Utc::now().timestamp();
+        let latest_start = default_start().0;
 
-        assert!(args.start.0 == earliest_start || args.start.0 == latest_start);
-        assert!((before..=after).contains(&args.end.0));
+        assert!(start.0 == earliest_start || start.0 == latest_start);
+        assert!((before..=after).contains(&end.0));
         assert_eq!(args.service, "foo");
         assert_eq!(args.keyword.as_deref(), Some("timeout"));
     }

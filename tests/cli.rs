@@ -297,7 +297,7 @@ fn search_sends_filters_keyword_and_time_range() {
             "-k",
             "someKeyword",
             "--start",
-            "2026-10-14 10:01:02",
+            "2026-10-14T10:01:02+08",
             "--end",
             "1792994561",
         ])
@@ -307,6 +307,44 @@ fn search_sends_filters_keyword_and_time_range() {
     request.assert();
     let output: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
     assert_eq!(output, upstream);
+}
+
+#[test]
+fn search_derives_end_from_a_date_only_start() {
+    let start = chrono::DateTime::parse_from_rfc3339("2026-10-13T16:00:00Z")
+        .unwrap()
+        .timestamp();
+    let end = chrono::DateTime::parse_from_rfc3339("2026-10-14T16:00:00Z")
+        .unwrap()
+        .timestamp();
+    let mut server = Server::new();
+    let request = server
+        .mock("POST", "/api/services/foo/_search")
+        .match_body(Matcher::Json(json!({
+            "keyword": "timeout",
+            "start": start,
+            "end": end
+        })))
+        .with_status(200)
+        .with_body("{}")
+        .expect(1)
+        .create();
+    let home = TempDir::new().expect("temporary home should be created");
+    write_config(&home, &format!("base_url = \"{}\"\n", server.url()));
+
+    chuanshanjia(&home)
+        .args([
+            "search",
+            "foo",
+            "--keyword",
+            "timeout",
+            "--start",
+            "2026-10-14",
+        ])
+        .assert()
+        .success();
+
+    request.assert();
 }
 
 #[test]
@@ -442,15 +480,17 @@ fn search_rejects_invalid_filters() {
 fn search_rejects_invalid_or_reversed_time() {
     let home = TempDir::new().expect("temporary home should be created");
 
-    let assert = chuanshanjia(&home)
-        .args(["search", "foo", "-k", "timeout", "--start", "invalid"])
-        .assert()
-        .failure();
-    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
-    assert!(
-        stderr.contains("时间格式无效"),
-        "unexpected stderr: {stderr}"
-    );
+    for value in ["invalid", "2026-10-14 10:01:02"] {
+        let assert = chuanshanjia(&home)
+            .args(["search", "foo", "-k", "timeout", "--start", value])
+            .assert()
+            .failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+        assert!(
+            stderr.contains("时间格式无效"),
+            "unexpected stderr: {stderr}"
+        );
+    }
 
     let assert = chuanshanjia(&home)
         .args([
@@ -466,11 +506,13 @@ fn search_rejects_invalid_or_reversed_time() {
 }
 
 #[test]
-fn trace_sends_trace_id_and_time_range() {
+fn trace_derives_end_from_start() {
     let start = chrono::DateTime::parse_from_rfc3339("2026-10-14T02:01:02Z")
         .unwrap()
         .timestamp();
-    let end = 1792994561;
+    let end = chrono::DateTime::parse_from_rfc3339("2026-10-14T16:00:00Z")
+        .unwrap()
+        .timestamp();
     let response = json!({
         "took": 12,
         "count": 1,
@@ -504,9 +546,7 @@ fn trace_sends_trace_id_and_time_range() {
             "--token",
             "cli-token",
             "--start",
-            "2026-10-14 10:01:02",
-            "--end",
-            "1792994561",
+            "2026-10-14T10:01:02+08",
         ])
         .assert()
         .success();

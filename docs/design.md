@@ -68,9 +68,9 @@ CLI 保留最小查询模型：service、可重复的等值 filter、单个 keyw
 
 ### 3.2 时间与 URL
 
-时间输入支持带时区 ISO 8601/RFC 3339、`YYYY-MM-DD HH:mm:ss` 和 epoch seconds，统一转换为秒级时间戳。naive 时间固定按 UTC+8 解释，保证同一命令在不同机器上语义一致。
+时间输入支持 `YYYY-MM-DD`、epoch seconds 和带显式时区的 ISO 8601/RFC 3339（包括 `+08`、`+08:00`、`Z` 及其他合法偏移），统一转换为秒级时间戳。`YYYY-MM-DD` 固定按 UTC+8 当天零点解释，保证同一命令在不同机器上语义一致；不接受空格分隔且不带时区的 `YYYY-MM-DD HH:mm:ss`。
 
-默认区间是 UTC+8 当天零点到当前时刻；要求 `start < end`，对外语义为 `[start, end)`。
+默认区间是 UTC+8 当天零点到当前时刻。只显式提供 `--start` 时，`--end` 取 `start` 之后的下一个 UTC+8 日界；即使 `start` 正好是当天零点，也取次日零点。始终要求 `start < end`，对外语义为 `[start, end)`。
 
 `base_url` 必须是 HTTP(S) URL。CLI 保留其已有路径前缀；业务端点统一位于 `api` 下：服务列表追加 `api/services`，卖家查询追加 `api/sellers`，查询与追踪追加 `api/services`、service 与 `_search`/`_trace` URL segment，不自行实现 provider 路由。
 

@@ -84,7 +84,7 @@ chuanshanjia sellers <SELLER> [--platform PLATFORM] [--token JWT]
 chuanshanjia search foo \
   -f service=order \
   -k "connection timeout" \
-  --start="2026-10-14 10:01:02" \
+  --start="2026-10-14T10:01:02+08" \
   --end=1792994561
 ```
 
@@ -111,13 +111,15 @@ chuanshanjia config
 
 ### 时间语义
 
-`--start` 默认为 UTC+8 当天 00:00:00，`--end` 默认为当前时间，要求 `start < end`。支持三种格式：
+`--start` 和 `--end` 支持三种格式：
 
-1. 带时区的 ISO 8601/RFC 3339，如 `2026-10-14T10:01:02+08:00`、`2026-10-14T02:01:02Z`。
-2. `YYYY-MM-DD HH:mm:ss`，固定按 UTC+8 解释，不取系统时区。
-3. Epoch seconds，如 `1792994561`。
+1. `YYYY-MM-DD`，固定按 Asia/Shanghai（UTC+8）当天 00:00:00 解释，如 `2026-10-14`。
+2. Epoch seconds，如 `1792994561`。
+3. 带显式时区的 ISO 8601/RFC 3339，如 `2026-10-14T10:01:02+08`、`2026-10-14T10:01:02+08:00`、`2026-10-14T02:01:02Z`，也接受其他合法偏移。
 
-CLI 将时间统一转换为 epoch seconds，按 `[start, end)` 请求服务。对 `localhost`、`127.0.0.1`、`::1` 目标自动绕过系统代理。
+`--start` 省略时默认为 UTC+8 当天 00:00:00。只显式提供 `--start` 时，`--end` 自动取 `start` 之后的下一个 UTC+8 日界；即使 `start` 正好是当天零点，也取次日零点。两者都省略时，`--end` 默认为当前时间。始终要求 `start < end`。
+
+不再接受空格分隔且不带时区的 `YYYY-MM-DD HH:mm:ss`。CLI 将时间统一转换为 epoch seconds，按 `[start, end)` 请求服务。对 `localhost`、`127.0.0.1`、`::1` 目标自动绕过系统代理。
 
 ## 跨服务追踪
 

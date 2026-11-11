@@ -37,7 +37,7 @@ docs/backend-migration.md    # 原服务端行为契约与 Python 重实现说�
 - **行为变更必须同步文档**：改动 CLI 参数、查询语义、配置、认证、输出或错误时，更新 README.md、docs/design.md 和对应测试。
 - **本仓库保持纯 CLI**：不要重新引入服务端 crate、云服务 provider 或本地 server 配置。外部服务由其他项目实现。
 - **外部契约变更要有依据**：CLI 依赖的 HTTP/OIDC 接口变化必须同步 `docs/backend-migration.md`，不要擅自改变既有请求、响应或认证语义。
-- **时间语义稳定**：对外统一 epoch seconds、区间 `[start, end)`；CLI naive 时间固定按 UTC+8 解释，不要改成系统时区。
+- **时间语义稳定**：对外统一 epoch seconds、区间 `[start, end)`；CLI 的 `YYYY-MM-DD` 固定按 UTC+8 解释，不要改成系统时区；仅传 `--start` 时，`--end` 取下一个 UTC+8 日界。
 - **测试隔离**：外部 HTTP 服务与 IdP 用 mockito，外部命令和 HOME 用临时目录；不访问真实云服务或 IdP，不读取真实用户配置。新增行为先补测试。
 - **CLI 不保存 client_secret**：登录必须是公开客户端 + PKCE（S256）+ loopback 回调，`state` 必须校验，不要把 secret 打进二进制。
 - **OIDC 能力按实际 IdP 验证**：改动认证前通过 discovery 和测试确认 JWT access token、RFC 8707 resource、loopback redirect、offline access/refresh token 等支持；示例域名只是占位符。
