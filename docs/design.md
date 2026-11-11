@@ -10,6 +10,7 @@
 - 用 `chuanshanjia sellers` 按 sellerNick、sellerId、storeId 或 leyanSellerId 查卖家；
 - 用统一的 `chuanshanjia search <service> -f k=v -k kw` 表达查询；
 - 用 `chuanshanjia trace <service> <trace_id>` 做跨服务追踪；
+- 用 `chuanshanjia workflow <WORKFLOW>` 的专用子命令执行服务端复合编排；
 - 将参数、时间和 token 归一化后调用外部 HTTP 服务；
 - 将服务端 JSON 原样作为 CLI 的结构化结果输出；
 - 用标准 OIDC 流程降低手工分发和刷新 token 的成本。
@@ -28,6 +29,7 @@
 │ chuanshanjia │   GET /api/sellers                │ 外部 HTTP 查询服务 │
 │ CLI          │   POST /api/services/{s}/_search  │ （其他项目实现）   │
 │              │   POST /api/services/{s}/_trace   │                    │
+│              │   POST /api/workflows/{name}      │                    │
 │              │ ────────────────────────────▶ │                    │
 └──────────────┘   Authorization: Bearer JWT       └────────────────────┘
        │
@@ -66,17 +68,19 @@ CLI 保留最小查询模型：service、可重复的等值 filter、单个 keyw
 
 跨服务追踪是独立的只读命令：`trace <SERVICE> <TRACE_ID>` 生成 `POST /api/services/{service}/_trace` 请求体 `{"trace_id","start","end"}`。related 扇出、并行查询与按时间升序合并都是服务端职责，CLI 只透传响应。
 
+Workflow 采用嵌套专用子命令，为每个已知 workflow 提供具名参数和输入校验：`workflow seller-exam <LEYAN_SELLER_ID>` 只发送 `leyan_seller_id`；`workflow message-id --platform <PLATFORM> --message-id <MESSAGE_ID>` 发送 `platform`、`message_id` 和时间区间。两者都请求 `POST /api/workflows/{name}`。卖家聚合、trace 定位、related 扇出与结果合并均由服务端完成；新增 workflow 需要显式添加对应子命令，CLI 不接受通用 `PAYLOAD_JSON`。
+
 ### 3.2 时间与 URL
 
 时间输入支持 `YYYY-MM-DD`、epoch seconds 和带显式时区的 ISO 8601/RFC 3339（包括 `+08`、`+08:00`、`Z` 及其他合法偏移），统一转换为秒级时间戳。`YYYY-MM-DD` 固定按 UTC+8 当天零点解释，保证同一命令在不同机器上语义一致；不接受空格分隔且不带时区的 `YYYY-MM-DD HH:mm:ss`。
 
-默认区间是 UTC+8 当天零点到当前时刻。只显式提供 `--start` 时，`--end` 取 `start` 之后的下一个 UTC+8 日界；即使 `start` 正好是当天零点，也取次日零点。始终要求 `start < end`，对外语义为 `[start, end)`。
+`search`、`trace` 和 `workflow message-id` 的默认区间是 UTC+8 当天零点到当前时刻。只显式提供 `--start` 时，`--end` 取 `start` 之后的下一个 UTC+8 日界；即使 `start` 正好是当天零点，也取次日零点。始终要求 `start < end`，对外语义为 `[start, end)`。
 
-`base_url` 必须是 HTTP(S) URL。CLI 保留其已有路径前缀；业务端点统一位于 `api` 下：服务列表追加 `api/services`，卖家查询追加 `api/sellers`，查询与追踪追加 `api/services`、service 与 `_search`/`_trace` URL segment，不自行实现 provider 路由。
+`base_url` 必须是 HTTP(S) URL。CLI 保留其已有路径前缀；业务端点统一位于 `api` 下：服务列表追加 `api/services`，卖家查询追加 `api/sellers`，查询与追踪追加 `api/services`、service 与 `_search`/`_trace` URL segment，workflow 追加 `api/workflows` 与 workflow 名称，不自行实现 provider 路由。
 
 ### 3.3 HTTP、输出与错误
 
-- 服务列表、卖家查询、搜索和追踪使用 reqwest blocking client，CLI 自身没有运行时服务和后台状态；
+- 服务列表、卖家查询、搜索、追踪和 workflow 使用 reqwest blocking client，CLI 自身没有运行时服务和后台状态；
 - 卖家参数作为 URL query 发送（`seller_id`、`leyan_seller_id`、`seller_nick` 与 `platform`），由服务端完成互斥校验；
 - token 以 `Authorization: Bearer <JWT>` 发送；
 - localhost、127.0.0.1、::1 自动禁用系统代理，避免企业代理拦截本机请求；
@@ -100,7 +104,7 @@ CLI 不负责把服务端错误转换成另一套模型，因此 Python 重实�
 - 不保存 client_secret，不将凭证内容写入日志；
 - `logout` 只需删除该文件即可清理本地会话。
 
-服务列表、卖家查询、搜索和追踪的 token 优先级为 `--token` > 本地登录会话 > 配置文件静态 token。显式参数优先便于一次性覆盖，本地会话优先于静态配置则避免过期配置遮蔽自动续期结果。
+服务列表、卖家查询、搜索、追踪和 workflow 的 token 优先级为 `--token` > 本地登录会话 > 配置文件静态 token。显式参数优先便于一次性覆盖，本地会话优先于静态配置则避免过期配置遮蔽自动续期结果。
 
 ## 5. OIDC 设计
 
@@ -155,6 +159,7 @@ CLI 的 resource、外部服务接受的 audience 和 IdP 资源登记必须一�
 - `tests/cli.rs` 用 assert_cmd 执行真实二进制，以 mockito 模拟外部 HTTP 服务与 IdP；
 - 服务列表测试验证 GET 路径、Bearer token 和 JSON 输出；搜索测试验证请求 body、Bearer token 优先级、响应输出和非 2xx 错误；
 - 卖家测试验证参数形状到 query 的映射（数字/UUID/昵称+platform）及缺少 `--platform` 的报错；
+- workflow 测试验证两个专用子命令的 POST 路径、封闭请求 body、token 优先级、时间推导、JSON 输出、必填参数与非 2xx 错误；
 - 登录测试覆盖本地配置校验、不请求后端元数据、授权 URL、PKCE、state、loopback 回调、`0600` 凭证、静默续期和登出；
 - 测试主目录与外部命令均使用临时目录，不读取真实用户配置；
 - 不启动原 Rust backend，不请求真实 IdP 或云服务；

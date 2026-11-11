@@ -272,7 +272,12 @@ Python 重实现（chuanshanjia-server）已对 §3.1–3.2 的历史契约做�
 - 业务端点统一挂 `/api` 前缀：`GET /api/services`、`GET /api/sellers`、`GET /api/sellers/{leyan_seller_id}`、`POST /api/services/{service}/_search`；
 - 搜索请求改为封闭扁平 schema：顶层仅允许 `env`、`version`、`level`、`host`、`trace_id`、`span_id`、`keyword`、`start`、`end`，未知字段返回 422。等值 filter 不再嵌套在 `filter` 对象里，而是直接作为顶层字段；原 `keywords` 更名为 `keyword`（子串匹配）；
 - `service` 不在请求体中，由 URL path 指定；
-- 新增跨服务追踪端点 `POST /api/services/{service}/_trace`：请求体仅允许 `trace_id`、`start`、`end`。服务端查询锚点 service 及其 `related` 声明的传递闭包，按 `ts` 稳定升序合并日志，响应在搜索响应之上增加 `sources`（每个源的 `service`、`count`、`took`、`complete`、`error`）；单个源失败不拖垮整体，失败信息记入该源的 `sources` 条目。
+- 新增跨服务追踪端点 `POST /api/services/{service}/_trace`：请求体仅允许 `trace_id`、`start`、`end`。服务端查询锚点 service 及其 `related` 声明的传递闭包，按 `ts` 稳定升序合并日志，响应在搜索响应之上增加 `sources`（每个源的 `service`、`count`、`took`、`complete`、`error`）；单个源失败不拖垮整体，失败信息记入该源的 `sources` 条目；
+- 新增手动注册的 workflow 端点 `POST /api/workflows/{name}`，认证与搜索接口一致，未注册的 name 返回 404。每个 workflow 使用独立的封闭请求/响应 schema，多余字段返回 422；
+- `seller-exam` 请求体仅允许 UUID 字段 `leyan_seller_id`，聚合 Mixer 主记录与 Dealer `access_token`，响应及 404/503/502 语义与 `GET /api/sellers/{leyan_seller_id}` 一致；
+- `message-id` 请求体仅允许 `start`、`end`、`platform`、`message_id`，其中时间是有符号 epoch seconds 且 `start < end`，平台和消息 ID 不能为空。服务端先按 `keyword=message_id` 搜索 `kt-mixer-{platform}`：未知平台或无可用 trace_id 返回 404，命中多个 trace_id 返回 422；唯一定位后按 `_trace` 语义查询该平台及其 related 闭包，响应在 trace 响应上增加 `trace_id`，日志按 `ts` 稳定升序合并。
+
+CLI 通过 `workflow seller-exam <LEYAN_SELLER_ID>` 和 `workflow message-id --platform <PLATFORM> --message-id <MESSAGE_ID> [--start TIME] [--end TIME]` 调用上述端点，不提供通用 JSON 透传入口。message-id 的时间解析与默认区间复用 CLI 的 search/trace 语义，发送时始终包含 epoch seconds 的 `start`、`end`。
 
 本章以下的历史章节（§4 起）仍描述参考实现 `e8a549e` 的原语义，仅作迁移参考。
 
@@ -677,7 +682,8 @@ providers/tls.py        查询、签名、分页、响应与错误转换
 - ES：查询 body、时间范围、空 keywords 差异、hit fallback、上游错误透传；
 - SLS：查询转义、标量类型、非法 filter、100/1000 分页边界、Complete 汇总、request ID 错误；
 - TLS：查询转义、紧凑请求体、毫秒时间、Context 分页、complete/took 汇总、上述两组签名参考向量、STS 和错误透传；
-- 兼容性：覆盖 CLI 的 `services`、`search`、不依赖后端元数据的 OIDC 登录，以及 token 刷新后查询。
+- Workflow：seller-exam 的 Mixer/Dealer 聚合与 404/503/502；message-id 的唯一 trace 定位、未知平台、无 trace、多 trace、related 扇出与日志排序；
+- 兼容性：覆盖 CLI 的 `services`、`search`、`trace`、两个 workflow 子命令、不依赖后端元数据的 OIDC 登录，以及 token 刷新后查询。
 
 测试使用 mock HTTP 上游和内存 JWKS/OIDC fixture，不访问真实云服务。
 
