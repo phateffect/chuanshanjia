@@ -158,7 +158,7 @@ CLI 的 resource、外部服务接受的 audience 和 IdP 资源登记必须一�
 - 登录测试覆盖本地配置校验、不请求后端元数据、授权 URL、PKCE、state、loopback 回调、`0600` 凭证、静默续期和登出；
 - 测试主目录与外部命令均使用临时目录，不读取真实用户配置；
 - 不启动原 Rust backend，不请求真实 IdP 或云服务；
-- CI 在 macOS、Ubuntu、Windows 运行 `fmt-check → test → lint → build`，clippy 使用 `-D warnings`；release 只构建 CLI。
+- CI 在 macOS、Ubuntu、Windows 运行 `fmt-check → test → lint → build`，clippy 使用 `-D warnings`；release 只构建 CLI，并从 `vX.Y.Z` tag 设置 Cargo 包版本，逐平台校验 `-V` 和 `--version` 输出 `chuanshanjia X.Y.Z` 后才上传产物。
 
 ## 7. 演进边界
 

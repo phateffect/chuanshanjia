@@ -24,7 +24,31 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
+      - name: Set CLI version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION" == "$GITHUB_REF_NAME" ]]; then
+            echo "::error::Release tag must start with 'v': ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          sed "s/^version = \".*\"$/version = \"$VERSION\"/" Cargo.toml > Cargo.toml.release
+          mv Cargo.toml.release Cargo.toml
+          mise exec -- cargo metadata --format-version 1 > /dev/null
+          echo "EXPECTED_VERSION=$VERSION" >> "$GITHUB_ENV"
       - run: mise exec -- cargo build --locked --release --package chuanshanjia --bin chuanshanjia
+      - name: Verify CLI version
+        shell: bash
+        run: |
+          EXPECTED="chuanshanjia ${EXPECTED_VERSION}"
+          BINARY="./target/release/chuanshanjia${{ matrix.extension }}"
+          for FLAG in -V --version; do
+            ACTUAL=$("$BINARY" "$FLAG")
+            if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+              echo "::error::${BINARY} ${FLAG} printed '${ACTUAL}', expected '${EXPECTED}'"
+              exit 1
+            fi
+          done
       - name: Stage binary
         shell: bash
         run: |
