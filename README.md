@@ -182,7 +182,7 @@ cargo test --test cli
 
 测试使用 assert_cmd 驱动真实 CLI 二进制，以 mockito 模拟外部 HTTP 服务和 IdP；覆盖参数、时间、token 传递、错误输出、OIDC 登录、state 校验、PKCE、静默续期与登出，不读取真实用户配置，也不访问真实云服务。
 
-GitHub Actions 在 macOS、Ubuntu、Windows 上执行格式检查、测试、clippy 和构建，并只发布三个平台的 CLI 产物。
+GitHub Actions 在 macOS、Ubuntu、Windows 上执行格式检查、测试、clippy 和构建，并只发布三个平台的 CLI 产物。推送 `vX.Y.Z` tag 时，release 构建将 Cargo 包版本设为 `X.Y.Z`，并在上传前检查 `-V` 和 `--version` 均输出 `chuanshanjia X.Y.Z`。
 
 ## 当前限制
 

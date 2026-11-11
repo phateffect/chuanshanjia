@@ -33,7 +33,7 @@ const DEFAULT_CONFIG: &str = "base_url = \"\"\n# token = \"\"\n# issuer = \"http
 
 /// 通过 chuanshanjia 后端查询日志。
 #[derive(Cli)]
-#[usage(bin = "chuanshanjia", version = "0.1.0", arg_required_else_help)]
+#[usage(bin = "chuanshanjia", version, arg_required_else_help)]
 struct Chuanshanjia {
     #[usage(subcommand)]
     command: Commands,

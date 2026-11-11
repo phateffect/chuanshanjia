@@ -636,9 +636,14 @@ fn help_and_version_do_not_need_config() {
     assert!(stdout.contains("--start"), "unexpected stdout: {stdout}");
     assert!(stdout.contains("--end"), "unexpected stdout: {stdout}");
 
-    let version = chuanshanjia(&home).arg("--version").assert().success();
-    let stdout = String::from_utf8_lossy(&version.get_output().stdout);
-    assert_eq!(stdout.trim(), "chuanshanjia 0.1.0");
+    for flag in ["-V", "--version"] {
+        let version = chuanshanjia(&home).arg(flag).assert().success();
+        let stdout = String::from_utf8_lossy(&version.get_output().stdout);
+        assert_eq!(
+            stdout.trim(),
+            concat!("chuanshanjia ", env!("CARGO_PKG_VERSION"))
+        );
+    }
 }
 
 /// Plays the browser: waits for the CLI to listen, then delivers a successful callback.
